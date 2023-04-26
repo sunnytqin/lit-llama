@@ -5,9 +5,14 @@ Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT.
 # mypy: ignore-errors
 import math
 from dataclasses import dataclass
+import tempfile
+
 
 import torch
 import torch.nn as nn
+from torch.distributed import rpc
+from torch.distributed.pipeline.sync import Pipe
+
 from torch.nn import functional as F
 from typing_extensions import Self
 
@@ -32,6 +37,52 @@ llama_configs = {
     "65B": LLaMAConfig(n_layer=80, n_head=64, n_embd=8192),
 }
 
+
+class pipeLLaMA(nn.Module):
+    def __init__(self, config: LLaMAConfig) -> None:
+        super().__init__()
+        assert config.vocab_size is not None
+        assert config.block_size is not None
+        self.config = config
+
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        partitioned_blocks, self.partition_schedule = ppLLaMA(config)
+        self.transformer = nn.ModuleDict(
+            dict(
+                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                #h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                h=partitioned_blocks,
+                ln_f=RMSNorm(config.n_embd),
+            )
+        )
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer))
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer))
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        _, t = idx.size()
+        assert (
+            t <= self.config.block_size
+        ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+
+        # forward the LLaMA model itself
+        x = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
+
+        #for block in self.transformer.h:
+        #    x = block(x).cuda(0)
+        x = self.transformer.h(x).local_value().cuda(0)
+        x = self.transformer.ln_f(x)
+
+        logits = self.lm_head(x)  # (b, t, vocab_size)
+
+        return logits
+
+    @classmethod
+    def from_name(cls, name: str) -> Self:
+        return cls(LLaMAConfig.from_name(name))
 
 class LLaMA(nn.Module):
     def __init__(self, config: LLaMAConfig) -> None:
@@ -231,3 +282,53 @@ def apply_rope(x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
     rope_cache = rope_cache.view(1, xc.size(1), 1, xc.size(3))
     x_out = torch.view_as_real(xc * rope_cache).flatten(3)
     return x_out.transpose(1, 2).type_as(x)
+
+
+def ppLLaMA(config: LLaMAConfig):
+        lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        if torch.cuda.device_count() < 3:
+            print('Need at least three GPU devices for inference')
+            sys.exit(0)
+        print("GPU count: ", torch.cuda.device_count())
+        device = torch.device("cuda")
+
+        tmpfile = tempfile.NamedTemporaryFile()
+        rpc.init_rpc(
+            name="worker",
+            rank=0,
+            world_size=1,
+            rpc_backend_options=rpc.TensorPipeRpcBackendOptions(
+                init_method="file://{}".format(tmpfile.name),
+                # Specifying _transports and _channels is a workaround and we no longer
+                # will have to specify _transports and _channels for PyTorch
+                # versions >= 1.8.1
+                _transports=["ibv", "uv"],
+                _channels=["cuda_ipc", "cuda_basic"],
+            )
+        )
+
+        num_gpus = 2
+        partition_len = ((config.n_layer - 1) // num_gpus) + 1
+
+        tmp_list = []
+        module_list = []
+        partition_schedule = dict()
+        
+        # add all transformer blocks
+        for i in range(config.n_layer):
+            transformer_block = Block(config)
+            if i !=0 and i % (partition_len) == 0:
+                module_list.append(nn.Sequential(*tmp_list))
+                tmp_list = []
+            device = i // (partition_len)
+            partition_schedule[i] = f"partitions.{device}.{i - device * partition_len}" 
+            tmp_list.append(transformer_block.to(device))
+        module_list.append(nn.Sequential(*tmp_list))
+
+        # build the pipeline
+        chunks = 1 # default micro-batches
+        model = Pipe(torch.nn.Sequential(*module_list), chunks = chunks)
+
+        return model, partition_schedule
+
