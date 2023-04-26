@@ -12,7 +12,8 @@ from lightning.fabric.strategies import DeepSpeedStrategy, FSDPStrategy
 from torch.distributed.fsdp import FullStateDictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
-
+from torch.functional import F
+import torch.nn as nn
 
 llama_model_sizes = {
     4096: "7B",  # 7B n_embd=4096
@@ -126,6 +127,20 @@ class EmptyInitOnDevice(torch.overrides.TorchFunctionMode):
         ):
             kwargs["dtype"] = self.dtype
         return func(*args, **kwargs)
+
+class JSD(nn.Module):
+    
+    def __init__(self):
+        super(JSD, self).__init__()
+    
+    def forward(self, net_1_probs, net_2_probs):
+        total_m = 0.5 * (net_1_probs + net_1_probs)
+        loss = torch.zeros(net_1_probs.shape[0], device=net_1_probs.device, dtype=net_1_probs.dtype)
+        loss += F.kl_div(net_1_probs.log(), total_m.log(), reduction="none", log_target=True).sum(dim=(-1))
+        loss += F.kl_div(net_2_probs.log(), total_m.log(), reduction="none", log_target=True).sum(dim=(-1))
+     
+        return (0.5 * loss)
+
 
 
 # this is taken from torchhacks https://github.com/lernapparat/torchhacks
