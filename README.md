@@ -24,7 +24,7 @@
 Clone the repo
 
 ```bash
-git clone https://github.com/Lightning-AI/lit-llama](https://github.com/sunnytqin/lit-llama.git 
+git clone https://github.com/sunnytqin/lit-llama.git 
 cd lit-llama
 ```
 
