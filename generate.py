@@ -97,7 +97,7 @@ def main(
             ``"gptq.int4"``: GPTQ 4-bit mode.
     """
     if not checkpoint_path:
-        checkpoint_path = Path('/n/holystore01/LABS/barak_lab/Users/sqin/llama/checkpoints/lit-llama/7B/state_dict.pth')
+        checkpoint_path = Path('/n/holystore01/LABS/barak_lab/Users/sqin/llama/checkpoints/lit-llama/{model_size}/state_dict.pth')
     if not tokenizer_path:
         tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Users/sqin/llama/checkpoints/lit-llama/tokenizer.model')
     
