@@ -99,15 +99,15 @@ def main(
             ``"gptq.int4"``: GPTQ 4-bit mode.
     """
     if not checkpoint_path:
-        checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Users/sqin/llama/checkpoints/lit-llama/{model_size}/state_dict.pth')
+        checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/lit-llama/{model_size}/state_dict.pth')
     if not tokenizer_path:
-        tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Users/sqin/llama/checkpoints/lit-llama/tokenizer.model')
+        tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Everyone/checkpoints/lit-llama/tokenizer.model')
     
     assert checkpoint_path.is_file()
     assert tokenizer_path.is_file()
 
     large_model_size = "30B"
-    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Users/sqin/llama/checkpoints/lit-llama/{large_model_size}/state_dict.pth"
+    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/lit-llama/{large_model_size}/state_dict.pth"
     
     fabric = L.Fabric(accelerator="cuda", devices=[0])
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
@@ -149,7 +149,7 @@ def main(
     small_model.eval()
 
     tokenizer = Tokenizer(tokenizer_path)
-
+    
     while True: 
 
         prompt = input("Type prompt (or 'exit'): ")
