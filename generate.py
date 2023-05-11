@@ -99,15 +99,15 @@ def main(
             ``"gptq.int4"``: GPTQ 4-bit mode.
     """
     if not checkpoint_path:
-        checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/lit-llama/{model_size}/state_dict.pth')
+        checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/state_dict.pth')
     if not tokenizer_path:
-        tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Everyone/checkpoints/lit-llama/tokenizer.model')
+        tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model')
     
     assert checkpoint_path.is_file()
     assert tokenizer_path.is_file()
 
     large_model_size = "30B"
-    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/lit-llama/{large_model_size}/state_dict.pth"
+    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{large_model_size}/state_dict.pth"
     
     fabric = L.Fabric(accelerator="cuda", devices=[0])
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
@@ -123,13 +123,12 @@ def main(
         large_model = pipeLLaMA.from_name(large_model_size)
         partition_schedule = large_model.partition_schedule
         checkpoint = torch.load(large_checkpoint_path)
-        checkpoint_2 = copy.deepcopy(checkpoint)
-        for key in checkpoint:
+        for key in list(checkpoint.keys()):
             if 'transformer.h' in key:
                 split = key.split('.')
                 split[2] = partition_schedule[int(split[2])]
-                checkpoint_2[".".join(split)] = checkpoint_2.pop(key)
-        large_model.load_state_dict(checkpoint_2)
+                checkpoint[".".join(split)] = checkpoint.pop(key)
+        large_model.load_state_dict(checkpoint)
     print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
     large_model.eval()
