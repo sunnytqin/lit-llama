@@ -46,6 +46,25 @@ python generate.py --model_size 7B
 
 This will run the 7B model. The large model is the 30B model by default. 
 
+## Use the GUI
+
+![](https://github.com/sunnytqin/lit-llama/blob/main/demo%20(1).gif)
+
+### To run the GUI
+
+```
+python awesomegui.py --data [path_to_LLM_output]
+``` 
+
+For a sample output, use `output/sample_output`
+
+You only need a basic python environment (`python 3 + numpy`) to run the GUI - no need to install the entire environment! 
+
+### Output specs
+
+- It is the deterministic top k = 1 prediction. i.e., the token with the highest probability
+- For now, we generate 50 new tokens given the prompt auto regressively. I will soon run some teacher-forcing samples
+- We display the small model output by default and you need to click the token to see details 
 
 ### Gotchas
 
@@ -60,21 +79,3 @@ It takes a couple minutes to load the model but the inference is fast.
 On GPUs with `bfloat16` support, the `generate.py` script will automatically convert the weights and consume about ~14 GB.
 
 See `python generate.py --help` for more options.
-
-
-### Example Output
-
-```
-(hallucination) [sqin@holygpu8a27606 lit-llama]$ python generate.py --model_size 7B
-GPU count:  3
-Loading large model ...Time: 199.89 seconds.
-Loading small model ...Time: 25.38 seconds.
-Type prompt (or 'exit'): Hello, my name is
-[Hello, my name is] and(K) I ' m writing you today to learn more about the  2 0 1 6(5) Ford F - 1 5 0 X L(LT) (.) 4 WD Super C rew  5 . 5 '(-) Box available(listed) from(at) North(your) side(Park) Ford(Im) Lincoln(.) in(.) the(Mon) North(Austin) side Ford Lincoln . 
-
-[Hello, my name is] and(0.020) I(0.034) '(0.105) m(0.001) writing(0.017) you(0.005) today(0.004) to(0.014) learn(0.005) more(-0.000) about(-0.000) the(0.001) (0.010) 2(0.001) 0(0.000) 1(0.051) 6(0.198) Ford(0.075) F(0.026) -(0.009) 1(0.008) 5(0.000) 0(0.000) X(0.201) L(0.094) (0.283) 4(0.148) WD(0.005) Super(0.299) C(0.018) rew(0.050) (0.118) 5(0.131) .(0.073) 5(0.059) '(0.578) Box(0.021) available(1.516) from(3.375) North(0.598) side(0.625) Ford(0.385) Lincoln(1.047) in(0.570) the(1.047) North(0.598) side(0.754) Ford(0.492) Lincoln(0.168) .(0.555) 
-```
-
-- Small model output is generated autoregressively. Inside () is when large model disagree with the small model 
-- It is the top k = 1 prediction. i.e., the token with the highest probability
-- The second print inside () is the Jensen Shannon Distance between the large model prediction and small model prediction
