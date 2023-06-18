@@ -9,8 +9,11 @@ import lightning as L
 import torch
 
 from lit_llama import LLaMA, Tokenizer
-from lit_llama.utils import EmptyInitOnDevice, JSD
+from lit_llama.utils import EmptyInitOnDevice, jsd
 from lit_llama.model import pipeLLaMA, LLaMAConfig
+
+
+DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
 
 
 @torch.no_grad()
@@ -42,7 +45,7 @@ def generate(
     empty = torch.empty(B, T_new, dtype=idx.dtype, device=idx.device)
     empty[:, :T] = idx
     idx = empty
-    probs_list = torch.empty(max_new_tokens, 32_000, dtype=torch.bfloat16, device=idx.device)
+    probs_list = torch.empty(max_new_tokens, 32_000, dtype=DTYPE, device=idx.device)
 
     # generate max_new_tokens tokens
     for t in range(T, T_new):
@@ -51,8 +54,15 @@ def generate(
         # if the sequence context is growing too long we must crop it at max_seq_length
         idx_cond = idx_cond if T <= max_seq_length else idx_cond[:, -max_seq_length:]
 
+        if(max_new_tokens == 1):
+            print(f"idx_cond: {idx_cond.shape}")
+
         # forward
         logits = model(idx_cond)
+
+        if(max_new_tokens == 1):
+            print(f"logits: {logits.shape}")
+            print(f"logits: {logits[0, 0, :100]}")
         logits = logits[:, -1] / temperature
 
         # # optionally crop the logits to only the top k options
@@ -107,18 +117,15 @@ def main(
     assert tokenizer_path.is_file()
 
     large_model_size = "30B"
-    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{large_model_size}/state_dict.pth"
+    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{large_model_size}/state_dict.pth" 
     
-    fabric = L.Fabric(accelerator="cuda", devices=[0])
-    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-    
-    cuda0= torch.device('cuda:0')
-    cuda2 = torch.device('cuda:2')
-    
+    device_large = torch.device('cuda:0')
+    device_small = torch.device('cuda:2')
+  
+    print("Loading large model ...", file=sys.stderr, end='')
     with EmptyInitOnDevice(
-        device=fabric.device, dtype=dtype, quantization_mode=quantize
+        device=device_large, dtype=DTYPE, quantization_mode=quantize
     ):
-        print("Loading large model ...", file=sys.stderr, end='')
         t0 = time.time()
         large_model = pipeLLaMA.from_name(large_model_size)
         partition_schedule = large_model.partition_schedule
@@ -133,10 +140,8 @@ def main(
 
     large_model.eval()
 
-    fabric = L.Fabric(accelerator="cuda", devices=[2])
-
     with EmptyInitOnDevice(
-        device=fabric.device, dtype=dtype, quantization_mode=quantize
+        device=device_small, dtype=DTYPE, quantization_mode=quantize
     ):
         print("Loading small model ...", file=sys.stderr, end='')
         t0 = time.time()
@@ -156,7 +161,7 @@ def main(
         if prompt == 'exit':
             break
 
-        encoded_prompt = tokenizer.encode(prompt, bos=True, eos=False, device=cuda2)
+        encoded_prompt = tokenizer.encode(prompt, bos=True, eos=False, device=device_small)
         len_prompt = len(encoded_prompt)
         encoded_prompt = encoded_prompt[None, :]  # add batch dimension
 
@@ -176,11 +181,12 @@ def main(
 
         # print(f"\n\nTime for inference: {t:.02f} sec total, {num_samples * max_new_tokens / t:.02f} tokens/sec", file=sys.stderr)
         # print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
-        
         y_compare = [*encoded_prompt[0]]
-        probs_compare = torch.empty(max_new_tokens, 32_000, dtype=torch.bfloat16, device=encoded_prompt.device)
+        probs_compare = torch.empty(max_new_tokens, 32_000, dtype=DTYPE, device=encoded_prompt.device)
         for t in range(len_prompt, len(y)):
-            encoded_prompt_large = y[0: t][None, :].to(cuda0)
+            encoded_prompt_large = y[0: t][None, :].to(device_large)
+
+            print(large_model.config.block_size)
 
             t0 = time.perf_counter()
             y_large, probs_large = generate(
@@ -191,6 +197,7 @@ def main(
                 temperature=temperature,
                 top_k=top_k,
             )
+
             y_large = y_large[0]  # unpack batch dimension
             y_compare.append(y_large[-1].detach().int())
             probs_compare[t - len_prompt, :] = probs_large.squeeze()
@@ -198,9 +205,10 @@ def main(
         t = time.perf_counter() - t0
 
         # compute JS distance
-        jsd_distance= JSD().to(cuda2)
-        distance = jsd_distance(probs, probs_compare).tolist()
-        
+        distance = jsd(probs, probs_compare)
+        print(f"distance: {distance.shape}")
+        distance = distance.tolist()
+
         print(f"[{prompt}]", end=" ")
         for i in range(len_prompt, len_prompt + max_new_tokens):
             small_token = tokenizer.decode(y[i]).replace("\n","\\n")
