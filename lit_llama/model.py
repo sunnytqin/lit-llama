@@ -61,7 +61,7 @@ class pipeLLaMA(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer))
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def embed_sequence(self, idx: torch.Tensor) -> torch.Tensor:
         _, t = idx.size()
         assert (
             t <= self.config.block_size
@@ -75,6 +75,10 @@ class pipeLLaMA(nn.Module):
         x = self.transformer.h(x).local_value().cuda(0)
         x = self.transformer.ln_f(x)
 
+        return x
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        x = self.embed_sequence(x)
         logits = self.lm_head(x)  # (b, t, vocab_size)
 
         return logits
@@ -105,7 +109,7 @@ class LLaMA(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer))
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def embed_sequence(self, idx: torch.Tensor) -> torch.Tensor:
         _, t = idx.size()
         assert (
             t <= self.config.block_size
@@ -117,6 +121,11 @@ class LLaMA(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+
+        return x
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        x = self.embed_sequence(idx)
 
         logits = self.lm_head(x)  # (b, t, vocab_size)
 
@@ -283,8 +292,9 @@ def apply_rope(x: torch.Tensor, rope_cache: torch.Tensor) -> torch.Tensor:
 def ppLLaMA(config: LLaMAConfig):
         lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-        if torch.cuda.device_count() < 3:
-            print('Need at least three GPU devices for inference')
+        num_gpus = 2
+        if torch.cuda.device_count() < num_gpus:
+            print(f'Need at least {num_gpus} GPU devices for inference')
             sys.exit(0)
         print("GPU count: ", torch.cuda.device_count())
         device = torch.device("cuda")
@@ -304,7 +314,6 @@ def ppLLaMA(config: LLaMAConfig):
             )
         )
 
-        num_gpus = 2
         partition_len = ((config.n_layer - 1) // num_gpus) + 1
 
         tmp_list = []
