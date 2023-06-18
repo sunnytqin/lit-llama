@@ -13,7 +13,7 @@ import torch
 
 from lit_llama import LLaMA, Tokenizer
 from lit_llama.model import pipeLLaMA, LLaMAConfig
-from lit_llama.utils import EmptyInitOnDevice, JSD
+from lit_llama.utils import EmptyInitOnDevice, jsd
 
 
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
@@ -29,6 +29,7 @@ def main(
     tokenizer_path: Optional[Path] = None,
     quantize: Optional[str] = None,
     output_shard_size: int = 2500,
+    return_embeddings: bool = False,
     resume: bool = False,
 ) -> None:
     """Generates text samples based on a pre-trained LLaMA model and tokenizer.
@@ -43,6 +44,7 @@ def main(
             ``"llm.int8"``: LLM.int8() mode,
             ``"gptq.int4"``: GPTQ 4-bit mode.
         output_shard_size: Number of outputs per output shard
+        return_embeddings: Whether to skip the logit head and return raw embeddings
         resume: Quick and dirty resume functionality. DON'T CHANGE HYPERPARAMS.
     """
     if not checkpoint_path:
@@ -84,6 +86,8 @@ def main(
     def get_shard_path(shard_count):
         output_basename = os.path.split(prompts_json_path)[-1].split('.')[0]
         output_basename += f"_{model_size}"
+        if(return_embeddings):
+            output_basename += "_emb"
         shard_name = f"{output_basename}_{shard_count}.pickle"
         return os.path.join(output_dir, shard_name)
 
@@ -123,7 +127,11 @@ def main(
 
         # Run the model
         with torch.no_grad():
-            logits = model(encoded_prompt)
+            fn = model.forward
+            if(return_embeddings):
+                fn = model.embed_sequence
+
+            logits = fn(encoded_prompt)
 
         logits = logits.squeeze(0).cpu()
         outputs[key] = logits
