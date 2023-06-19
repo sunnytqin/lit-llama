@@ -7,7 +7,7 @@ import pickle
 import random
 import sys
 import time
-from typing import Optional
+from typing import Optional, Iterator, Tuple
 import warnings
 
 import lightning as L
@@ -20,8 +20,6 @@ from lit_llama.utils import EmptyInitOnDevice, jsd
 
 
 DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-
-assert(torch.cuda.device_count() >= 2)
 DEVICE = torch.device("cuda:0")
 
 
@@ -113,7 +111,10 @@ class PrecomputedShardLoader:
     def shuffle_shards(self, seed: int):
         random.Random(seed).shuffle(self.shards)
 
-    def gen(self):
+    def __iter__(self):
+        return self._gen()
+
+    def _gen(self):
         """
             Returns a generator that yields tuples of examples one by one.
         """
@@ -143,103 +144,116 @@ class PrecomputedShardLoader:
 
 
 def _discretize(
-    value: torch.Tensor, 
+    values: torch.Tensor, 
     no_bins: int, 
-    minimum: float, 
-    maximum: float
+    mi: float, 
+    ma: float
 ):
     """
         Discretizes the target into `no_bins` bins.
     """
-    assert(min < max)
+    assert(mi < ma)
     assert(no_bins > 0)
-    assert(len(value.shape) == 2)
 
     boundaries = torch.linspace(
-        minimum, maximum, no_bins + 1, device=value.device
+        mi, ma, no_bins + 1, device=values.device
     )
-    bins = bins.unsqueeze(0)
 
-    lt = boundaries[:-1] <= value
-    gt = boundaries[1:] > value
-    bin_id = torch.logical_and(lt, gt).argmax(dim=-1)
+    # Make shapes compatible
+    boundaries = boundaries.view(*([1]*len(values.shape)), -1)
+    values = values.unsqueeze(-1)
+
+    lt = boundaries[..., :-1] <= values
+    gt = boundaries[..., 1:] > values
+    bin_id = torch.logical_and(lt, gt).to(torch.int64).argmax(dim=-1)
     
-    return torch.nn.functional.one_hot(bin_id, no_bins)
+    return bin_id
 
 
-def _unpack_shard_tups(small_tup, large_tup, small_lm_head):
-    small_key, small_emb = small_tup
-    large_key, large_logits = large_tup
+def _preprocessor(
+    shard_loader: PrecomputedShardLoader,
+    small_lm_head: nn.Linear,
+    no_bins: int,
+    min_bin: float,
+    max_bin: float,
+    device: torch.device,
+):
+    for i, (small_tup, large_tup) in enumerate(shard_loader):
+        small_key, small_emb = small_tup
+        large_key, large_logits = large_tup
 
-    # Sanity check. The shards should be aligned such that the keys match.
-    assert(small_key == large_key)
-    
-    with torch.no_grad():
-        # Compute logits from the small model embeddings
-        small_logits = small_lm_head(small_emb)
+        # Sanity check. The shards should be aligned such that the keys match.
+        assert(small_key == large_key)
 
-        # Softmax both sets of logits
-        small_logits = torch.nn.functional.softmax(small_logits, dim=-1)
-        large_logits = torch.nn.functional.softmax(large_logits, dim=-1)
+        # Some empty articles slipped through my filter. Sad!
+        if(small_emb.shape[0] == 1):
+            continue
 
-        # Compute the JS divergence between the two distributions
-        distance = jsd(small_logits, large_logits)
+        small_emb = small_emb.to(device)
+        large_logits = large_logits.to(device)
         
-        # We will predict the log of the distance
-        target = torch.log(js_div)
+        with torch.no_grad():
+            # Compute logits from the small model embeddings
+            small_logits = small_lm_head(small_emb)
 
-    return (small_logits, distance)
+            # Softmax both sets of logits
+            small_logits = torch.nn.functional.softmax(small_logits, dim=-1)
+            large_logits = torch.nn.functional.softmax(large_logits, dim=-1)
+
+            # Compute the JS divergence between the two distributions
+            divergence = jsd(small_logits, large_logits)
+            
+            # We will predict the log of the divergence
+            target = torch.log(divergence)
+
+            # Discretize the target
+            target = _discretize(
+                target,
+                no_bins, 
+                mi=min_bin, 
+                ma=max_bin,
+            ).squeeze(0)
+
+        yield (small_emb, target)
 
 
 def batch_loader(
+    data_gen: Iterator[Tuple[torch.Tensor, torch.Tensor]],
     batch_size: int,
-    shard_loader: PrecomputedShardLoader,
-    lm_head: nn.Linear, 
-    skip_frac: float, 
-    no_bins: int,
-    device: torch.device,
+    skip_frac: float,
 ):
-    data_gen = shard_loader.gen()
     batch = []
-    for i, (small_tup, large_tup) in enumerate(data_gen):
-        small_emb, log_js_div = _unpack_shard_tups(
-            small_tup, large_tup, lm_head
-        )
-
-        small_emb = small_emb.to(device)
-        log_js_div = log_js_div.to(device)
-
+    for i, (small_emb, log_js_div) in enumerate(data_gen):
         # [N, emb_dim]
         assert(len(small_emb.shape) == 2)
         inputs = torch.unbind(small_emb, dim=-2)
 
         # [N]
-        assert(len(target.shape) == 1)
-        targets = torch.unbind(target, dim=-1)
+        assert(len(log_js_div.shape) == 1)
+        targets = torch.unbind(log_js_div, dim=-1)
 
         assert(len(inputs) == len(targets))
 
         for inp, target in zip(inputs, targets):
+            # We don't want too many consecutive tokens from the same prompt,
+            # so we skip a large percentage of them.
             if(random.random() < skip_frac):
                 continue
+
             batch.append((inp, target))
 
             if(len(batch) == batch_size):
                 inputs = torch.stack([t[0] for t in batch])
                 targets = torch.stack([t[1] for t in batch])
-        
-                # Discretize the targets
-                minimum = -3. # log(1e-3)
-                maximum = 0. # log(1)
-                target = _discretize_target(
-                    targets,
-                    no_bins, 
-                    minimum=minimum, 
-                    maximum=maximum,
-                )
+
+                assert(inputs.device == targets.device)
 
                 yield inputs, targets
 
+                batch = []
+
+    # Toss the last batch if it's too small
+    pass
 
 
 def main(
@@ -249,16 +263,18 @@ def main(
     output_dir: str,
     model_size: str = "7B",
     checkpoint_path: str = None,
-    quantize: Optional[str] = None,
-    no_bins: int = 100,
     hidden_dim: int = 1024,
-    no_hidden_layers: int = 2,
+    no_hidden_layers: int = 4,
     dropout: float = 0.1,
     activation: str = "relu",
-    lr: float = 1e-4,
+    lr: float = 1e-5,
     batch_size: int = 128,
     no_epochs: int = 10,
-    skip_frac: float = 0.98,
+    skip_frac: float = 0.95,
+    no_bins: int = 25,
+    min_bin: float = -3.,
+    max_bin: float = 0.,
+    seed: int = 42,
 ) -> None:
     """
     Args:
@@ -267,35 +283,45 @@ def main(
         output_dir: Where to save output files
         model_size: The size of the SMALL model. E.g. "7B" or "30B"
         checkpoint_path: The small LM checkpoint path.
-        quantize: Whether to quantize the model and using which method:
-            ``"llm.int8"``: LLM.int8() mode,
-            ``"gptq.int4"``: GPTQ 4-bit mode.
+        hidden_dim: Hidden dimension of the distance prediction head.
+        no_hidden_layers: Number of hidden layers in the distance prediction head.
+        dropout: Dropout probability in the distance prediction head.
+        activation: Activation function in the distance prediction head.
+        lr: Learning rate.
+        batch_size: Batch size.
+        no_epochs: Number of epochs.
+        skip_frac: Probability of skipping any given token.
+        no_bins: Number of bins to discretize the target into.
+        min_bin: Minimum value of the discretized target.
+        max_bin: Maximum value of the discretized target.
     """
+    torch.manual_seed(seed)
+    random.seed(seed)
+
     if not checkpoint_path:
         checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/state_dict.pth')
     
     assert checkpoint_path.is_file()
 
     # Load the small model's LM head
-    with EmptyInitOnDevice(
-        device=DEVICE, dtype=DTYPE, quantization_mode=quantize
-    ):
-        print("Loading small model... ", file=sys.stderr, end='')
-        t0 = time.time()
-        checkpoint = torch.load(checkpoint_path)
-        assert(len([k for k in checkpoint.keys() if "lm_head" in k]) == 1)
-        lm_head_weights = checkpoint["lm_head.weight"]
-        vocab_size, emb_dim = lm_head_weights.shape
-        lm_head = nn.Linear(
-            emb_dim, vocab_size, bias=False
-        )
-        with torch.no_grad():
-            lm_head.weight.data = lm_head_weights
-            lm_head.eval()
+    logging.info("Loading small model... ")
+    t0 = time.time()
+    checkpoint = torch.load(checkpoint_path)
+    assert(len([k for k in checkpoint.keys() if "lm_head" in k]) == 1)
+    lm_head_weights = checkpoint["lm_head.weight"]
+    vocab_size, emb_dim = lm_head_weights.shape
+    lm_head = nn.Linear(
+        emb_dim, vocab_size, bias=False
+    )
+    with torch.no_grad():
+        lm_head.weight.data = lm_head_weights.to(DTYPE)
+        lm_head.eval()
 
-        print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+    lm_head = lm_head.to(DEVICE)
 
-        del checkpoint
+    logging.info(f"Time: {time.time() - t0:.02f} seconds.")
+
+    del checkpoint
 
     # Load the precomputed logits
     logit_loader = PrecomputedShardLoader(
@@ -315,28 +341,49 @@ def main(
         activation=activation,
     )
     distance_prediction_head.to(DEVICE)
+    param_count = sum(
+        p.numel() for p in distance_prediction_head.parameters() if p.requires_grad
+    )
+    logging.info(f"Loaded prediction head ({param_count} parameters)...")
 
+    # Umm uhh
+    distance_prediction_head = torch.compile(distance_prediction_head)
+
+    # Initialize the optimizer
     optimizer = torch.optim.Adam(
         distance_prediction_head.parameters(), 
         lr=lr
     )
 
+    # Select the loss function
     loss_fn = torch.nn.functional.cross_entropy
 
+    # Standard training loop
     for epoch in range(no_epochs):
         shuffle_seed = random.randint(0, 2**32 - 1)
         logit_loader.shuffle_shards(shuffle_seed)
-        bl = batch_loader(
-            batch_size=batch_size,
+
+        data_gen = _preprocessor(
             shard_loader=logit_loader,
-            lm_head=lm_head,
-            skip_frac=skip_frac,
+            small_lm_head=lm_head,
             no_bins=no_bins,
+            min_bin=min_bin,
+            max_bin=max_bin,
+            device=DEVICE,
+        )
+
+        bl = batch_loader(
+            data_gen=data_gen,
+            batch_size=batch_size,
+            skip_frac=skip_frac,
         )
 
         for i, (inputs, targets) in enumerate(bl):
             inputs = inputs.to(DEVICE)
             targets = targets.to(DEVICE)
+
+            inputs = inputs.to(torch.float32)
+            targets = targets.to(torch.int64)
 
             optimizer.zero_grad()
             outputs = distance_prediction_head(inputs)

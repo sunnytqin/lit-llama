@@ -16,7 +16,7 @@ from lit_llama.model import pipeLLaMA, LLaMAConfig
 from lit_llama.utils import EmptyInitOnDevice, jsd
 
 
-DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+DTYPE = torch.float16
 DEVICE = torch.device('cuda:0')
 
 
