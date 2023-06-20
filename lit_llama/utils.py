@@ -130,7 +130,7 @@ class EmptyInitOnDevice(torch.overrides.TorchFunctionMode):
 
 
 def jsd(net_1_probs, net_2_probs):
-    total_m = 0.5 * (net_1_probs + net_1_probs)
+    total_m = 0.5 * (net_1_probs + net_2_probs)
     loss = torch.zeros(net_1_probs.shape[0], device=net_1_probs.device, dtype=net_1_probs.dtype)
     loss += F.kl_div(net_1_probs.log(), total_m.log(), reduction="none", log_target=True).sum(dim=(-1))
     loss += F.kl_div(net_2_probs.log(), total_m.log(), reduction="none", log_target=True).sum(dim=(-1))
