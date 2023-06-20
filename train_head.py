@@ -178,9 +178,13 @@ def _discretize(
     assert(mi < ma)
     assert(no_bins > 0)
 
+    # Clamp the values to the range [mi, ma]
+    values = torch.clamp(values, min=mi, max=ma)
+
     boundaries = torch.linspace(
         mi, ma, no_bins + 1, device=values.device
     )
+    boundaries[..., -1] = float('inf')
 
     # Make shapes compatible
     boundaries = boundaries.view(*([1]*len(values.shape)), -1)
@@ -294,10 +298,10 @@ def main(
     dropout: float = 0.1,
     activation: str = "relu",
     lr: float = 1e-6,
-    batch_size: int = 128,
+    batch_size: int = 64,
     no_epochs: int = 10,
     skip_frac: float = 0.95,
-    no_bins: int = 10,
+    no_bins: int = 5,
     min_bin: float = -3.,
     max_bin: float = 0.,
     seed: int = 42,
