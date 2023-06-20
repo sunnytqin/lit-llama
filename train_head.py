@@ -414,6 +414,10 @@ def main(
         )
 
         for i, (inputs, targets) in enumerate(bl):
+            # Dry run w/ grad enabled for the torch compiler (idk why this is necessary)
+            if(i == 0 and epoch == 0):
+                distance_prediction_head(inputs)
+
             # Periodically run the validation loop
             if(val and i % eval_every_n_batches == 0):
                 val_data_gen = _preprocessor(
@@ -433,22 +437,22 @@ def main(
                 )
 
                 with torch.no_grad():
-                    loss_sum = 0
-                    count = 0
-                    for i, (inputs, targets) in enumerate(val_bl):
-                        inputs = inputs.to(DEVICE)
-                        targets = targets.to(DEVICE)
+                    val_loss_sum = 0
+                    val_count = 0
+                    for j, (val_inputs, val_targets) in enumerate(val_bl):
+                        val_inputs = inputs.to(DEVICE)
+                        val_targets = targets.to(DEVICE)
 
-                        inputs = inputs.to(torch.float32)
-                        targets = targets.to(torch.int64)
+                        val_inputs = val_inputs.to(torch.float32)
+                        val_targets = val_targets.to(torch.int64)
 
-                        outputs = distance_prediction_head(inputs)
-                        loss = loss_fn(outputs, targets)
-                        loss_sum += torch.sum(loss).item()
+                        val_outputs = distance_prediction_head(val_inputs)
+                        val_loss = loss_fn(val_outputs, val_targets)
+                        val_loss_sum += torch.sum(val_loss).item()
 
-                        count += loss.numel()
+                        val_count += val_loss.numel()
 
-                    print(f"Validation loss: {loss_sum / count}")
+                    print(f"Validation loss: {val_loss_sum / val_count}")
 
             inputs = inputs.to(device=DEVICE, dtype=DTYPE)
             targets = targets.to(device=DEVICE, dtype=torch.int64)
