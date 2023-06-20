@@ -450,11 +450,8 @@ def main(
 
                     print(f"Validation loss: {loss_sum / count}")
 
-            inputs = inputs.to(DEVICE)
-            targets = targets.to(DEVICE)
-
-            inputs = inputs.to(torch.float32)
-            targets = targets.to(torch.int64)
+            inputs = inputs.to(device=DEVICE, dtype=DTYPE)
+            targets = targets.to(device=DEVICE, dtype=torch.int64)
 
             optimizer.zero_grad()
             outputs = distance_prediction_head(inputs)
