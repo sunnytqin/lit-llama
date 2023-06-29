@@ -299,6 +299,7 @@ def _wandb_setup(args):
         "project": "wandb_project",
         "entity": "wandb_entity",
         "name": "wandb_run_name",
+        "dir": "output_dir",
     }
     for arg in wandb_args.values():
         if(args[arg] is None):
@@ -317,6 +318,11 @@ def _wandb_setup(args):
     for metric, step_metric in wandb_metrics:
         assert(step_metric in WANDB_STEP_METRICS)
         wandb.define_metric(metric, step_metric=step_metric)
+
+    # Save the git diff for reproducibility
+    git_diff_path = os.path.join(args[wandb_args["dir"]], "git_diff.txt")
+    os.system(f"git diff > {git_diff_path}")
+    wandb.save(git_diff_path, base_path=f"./{args[wandb_args['dir']]}")
 
     return wandb_run
 
@@ -390,6 +396,9 @@ def main(
 
     torch.manual_seed(seed)
     random.seed(seed)
+
+    # Make the output directory
+    os.makedirs(output_dir, exist_ok=True)
 
     if(use_wandb):
         # Add some metrics that depend on arguments
@@ -602,7 +611,6 @@ def main(
 
 
     # Save the model
-    os.path.makedirs(output_dir, exist_ok=True)
     model_path = os.path.join(output_dir, "state_dict.pth")
     torch.save(distance_prediction_head.state_dict(), model_path)
 
