@@ -483,8 +483,6 @@ def main(
 
     # Standard training loop
     for epoch in range(no_epochs):
-        # Run the training loop
-
         wandb.log({"epoch": epoch})
 
         shuffle_seed = random.randint(0, 2**32 - 1)
