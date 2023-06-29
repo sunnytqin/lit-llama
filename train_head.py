@@ -57,15 +57,19 @@ class DistancePredictionHead(nn.Module):
             raise ValueError(f"Unknown activation: {activation}")
 
         self.layers = nn.ModuleList()
-        self.layers.append(nn.Linear(input_dim, hidden_dim))
-        self.layers.append(nn.Dropout(dropout))
-        self.layers.append(activation_class())
-        for _ in range(no_hidden_layers):
-            self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+
+        if(no_hidden_layers == 0):
+            self.layers.append(nn.Linear(input_dim, no_bins))
+        else:
+            self.layers.append(nn.Linear(input_dim, hidden_dim))
             self.layers.append(nn.Dropout(dropout))
             self.layers.append(activation_class())
+            for _ in range(no_hidden_layers - 1):
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+                self.layers.append(nn.Dropout(dropout))
+                self.layers.append(activation_class())
 
-        self.layers.append(nn.Linear(hidden_dim, no_bins))
+            self.layers.append(nn.Linear(hidden_dim, no_bins))
 
     def forward(self, x):
         for layer in self.layers:
@@ -350,7 +354,7 @@ def main(
     small_checkpoint_path: str = None,
     large_checkpoint_path: str = None,
     hidden_dim: int = 2048,
-    no_hidden_layers: int = 4,
+    no_hidden_layers: int = 5,
     dropout: float = 0.1,
     activation: str = "relu",
     lr: float = 1e-6,
