@@ -355,7 +355,7 @@ def main(
     activation: str = "relu",
     lr: float = 1e-6,
     batch_size: int = 64,
-    no_epochs: int = 10,
+    no_epochs: int = 5,
     skip_frac: float = 0.95,
     no_bins: int = 2,
     min_bin: float = -3.,
@@ -487,7 +487,8 @@ def main(
 
     # Standard training loop
     for epoch in range(no_epochs):
-        wandb.log({"epoch": epoch})
+        if(use_wandb):
+            wandb.log({"epoch": epoch})
 
         shuffle_seed = random.randint(0, 2**32 - 1)
         logit_loader.shuffle_shards(shuffle_seed)
