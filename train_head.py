@@ -301,7 +301,7 @@ def main(
     batch_size: int = 64,
     no_epochs: int = 10,
     skip_frac: float = 0.95,
-    no_bins: int = 5,
+    no_bins: int = 2,
     min_bin: float = -3.,
     max_bin: float = 0.,
     seed: int = 42,
@@ -444,12 +444,18 @@ def main(
                     skip_frac=0.,
                 )
 
+                confusion_matrix = torch.zeros(
+                    no_bins, no_bins, dtype=torch.int64, device=DEVICE
+                )
+
                 with torch.no_grad():
                     val_loss_sum = 0
-                    val_count = 0
+                    val_acc_sum = 0
+                    val_batch_count = 0
+                    val_token_count = 0
                     for j, (val_inputs, val_targets) in enumerate(val_bl):
-                        val_inputs = inputs.to(DEVICE)
-                        val_targets = targets.to(DEVICE)
+                        val_inputs = val_inputs.to(DEVICE)
+                        val_targets = val_targets.to(DEVICE)
 
                         val_inputs = val_inputs.to(torch.float32)
                         val_targets = val_targets.to(torch.int64)
@@ -458,9 +464,25 @@ def main(
                         val_loss = loss_fn(val_outputs, val_targets)
                         val_loss_sum += torch.sum(val_loss).item()
 
-                        val_count += val_loss.numel()
+                        val_acc = torch.argmax(val_outputs, dim=-1) == val_targets
+                        val_acc_sum += torch.mean(val_acc.float()).item()
 
-                    print(f"Validation loss: {val_loss_sum / val_count}")
+                        # Update the confusion matrix
+                        for k in range(no_bins):
+                            for l in range(no_bins):
+                                confusion_matrix[k, l] += torch.sum(
+                                    torch.logical_and(
+                                        val_targets == k,
+                                        torch.argmax(val_outputs, dim=-1) == l,
+                                    )
+                                )
+
+                        val_batch_count += 1
+                        val_token_count += val_inputs.shape[0]
+
+                    print(f"Validation loss: {val_loss_sum / val_batch_count}")
+                    print(f"Validation accuracy: {val_acc_sum / val_batch_count}")
+                    print(f"Validation confusion matrix: \n{confusion_matrix / val_token_count}")
 
             inputs = inputs.to(device=DEVICE, dtype=DTYPE)
             targets = targets.to(device=DEVICE, dtype=torch.int64)
@@ -471,8 +493,13 @@ def main(
             loss.backward()
             optimizer.step()
 
+            accuracy = torch.sum(
+                torch.argmax(outputs, dim=-1) == targets
+            ) / targets.numel()
+
             if i % 100 == 0:
                 print(f"Epoch {epoch}, batch {i}, loss {loss.item():.02f}", file=sys.stderr)
+                print(f"Epoch {epoch}, batch {i}, accuracy {accuracy.item():.02f}", file=sys.stderr)
 
                 
 
