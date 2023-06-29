@@ -490,6 +490,7 @@ def main(
     loss_fn = torch.nn.functional.cross_entropy
 
     # Standard training loop
+    cum_step = 0
     for epoch in range(no_epochs):
         if(use_wandb):
             wandb.log({"epoch": epoch})
@@ -513,7 +514,6 @@ def main(
             skip_frac=skip_frac,
         )
 
-        cum_step = 0
         for i, (inputs, targets) in enumerate(bl):
             # Dry run w/ grad enabled for the torch compiler (idk why this is necessary)
             if(i == 0 and epoch == 0):
@@ -625,7 +625,6 @@ def main(
                 print(f"Epoch {epoch}, batch {i}, accuracy: {accuracy.item():.02f}", file=sys.stderr)
 
             cum_step += 1
-
 
     # Save the model
     model_path = os.path.join(output_dir, "state_dict.pth")
