@@ -12,17 +12,19 @@ window=Tk()
 def main(args):
     file_path = args.data
     data = np.load(file_path)
-    prompts = data['prompts']
+    N_GEN = 10
+    TOPK = 5
 
-    JSD = data['JSD']
-    large_sentence_pieces = data['large_sentence_pieces']
-    small_sentence_pieces = data['small_sentence_pieces']
-    large_sentence_probs = data['large_sentence_probs']
-    small_sentence_probs = data['small_sentence_probs']
+    JSD = (data['JSD'][:1000]).reshape(N_GEN, -1)
+    entropy_small = (data['small_sentence_entropy'][:1000]).reshape(N_GEN, -1)
+    entropy_large = (data['large_sentence_entropy'][:1000]).reshape(N_GEN, -1)
+    large_sentence_pieces = np.reshape(data['large_sentence_pieces'][:1000, :], (N_GEN, -1, TOPK))
+    small_sentence_pieces = (data['small_sentence_pieces'][:1000, :]).reshape(N_GEN, -1, TOPK)
+    large_sentence_probs = (data['large_sentence_probs'][:1000, :]).reshape(N_GEN, -1, TOPK)
+    small_sentence_probs = (data['small_sentence_probs'][:1000, :]).reshape(N_GEN, -1, TOPK)
 
     WIDTH = 1000
     HEIGTH = 500
-    N_GEN = len(data['JSD'])
 
     window.title('Awesome GUI')
     window.geometry(f"{WIDTH}x{HEIGTH}")
@@ -37,7 +39,8 @@ def main(args):
         top= Toplevel(window)
         Label(top, text="prompt",font=('Courier', 15), fg="yellow", justify='left', wraplength=0.9*WIDTH).grid(row=1,column=1)
         Label(top, text="LLM generated text",font=('Courier', 15), fg="white", justify='left', wraplength=WIDTH, bd=-2).grid(row=2,column=1)
-        Label(top, text="LLM generated text (large difference)",font=('Courier', 15), fg="red", justify='left', wraplength=WIDTH, bd=-2).grid(row=3,column=1)
+        Label(top, text="LLM generated text (large Divergence)",font=('Courier', 15), fg="red", justify='left', wraplength=WIDTH, bd=-2).grid(row=3,column=1)
+        Label(top, text="LLM generated text (large small sure aka small entropy)",font=('Courier', 15), fg="orange", justify='left', wraplength=WIDTH, bd=-2).grid(row=3,column=1)
         Label(top, text="user clicked text",font=('Courier', 15), fg="green", justify='left', wraplength=WIDTH, bd=-2).grid(row=4,column=1)
         Label(top, text="user clicked text",font=('Courier', 15), fg="purple", justify='left', wraplength=WIDTH, bd=-2).grid(row=5,column=1)
         Label(top, text="Click on tokens to see logits and other info. \n use reset to reset color. \n next and prev to see different prompts",font=('Courier', 15), fg="white", justify='left', wraplength=WIDTH, bd=-2).grid(row=6,column=1)
@@ -81,6 +84,7 @@ def main(args):
 
         if link['fg'] == 'white': link['fg'] = 'green'
         if link['fg'] == 'red': link['fg'] = 'purple'
+        if link['fg'] == 'orange': link['fg'] = 'pink'
         root_x = window.winfo_rootx()
         root_y = window.winfo_rooty()
         top.geometry(f"500x250+{int(root_x+w)}+{int(root_y+h+20)}")
@@ -92,15 +96,17 @@ def main(args):
 
         for r in range(2, 6):
             j = r - 2
-            Label(top, text=f"{((small_sentence_pieces[idx, j, i]).replace('▁', ' '))}", font=('Courier 15')).grid(row=r,column=1)
+            Label(top, text=f"{((small_sentence_pieces[idx, i, j]).replace('▁', ' '))}", font=('Courier 15')).grid(row=r,column=1)
             Label(top, text=f"{small_sentence_probs[idx, i, j]:.2f}", font=('Courier 15')).grid(row=r,column=2)
-            Label(top, text=f"{((large_sentence_pieces[idx, j, i]).replace('▁', ' '))}", font=('Courier 15')).grid(row=r,column=3)
+            Label(top, text=f"{((large_sentence_pieces[idx, i, j]).replace('▁', ' '))}", font=('Courier 15')).grid(row=r,column=3)
             Label(top, text=f"{large_sentence_probs[idx, i, j]:.2f}", font=('Courier 15')).grid(row=r,column=4)
         
         Label(top, text='JSD', font=('Courier 15 bold')).grid(row=8,column=1)
         Label(top, text='Entropy (Small)', font=('Courier 15 bold')).grid(row=8,column=2)
         Label(top, text='Entropy (Large)', font=('Courier 15 bold')).grid(row=8,column=3)
         Label(top, text=f"{JSD[idx, i]:.2f}", font=('Courier 15')).grid(row=9,column=1)
+        Label(top, text=f"{entropy_small[idx, i]:.2f}", font=('Courier 15')).grid(row=9,column=2)
+        Label(top, text=f"{entropy_large[idx, i]:.2f}", font=('Courier 15')).grid(row=9,column=3)
 
         Button(top, text="Close", command=lambda top=top, link=link: close_and_reset(top, link)).grid(row=10,column=3)#button to close the window
         
@@ -108,6 +114,7 @@ def main(args):
         top.destroy()
         if link['fg'] == 'green':  link['fg'] = 'white'
         if link['fg'] == 'purple':  link['fg'] = 'red'
+        if link['fg'] == 'pink':  link['fg'] = 'orange'
 
     def next_page(inc):
         #Create a button in the main Window to open the popup
@@ -124,7 +131,7 @@ def main(args):
             link.pack()
             link.place(x=0, y=50)
             link_list.append(link)
-        elif idx + inc >= N_GEN:
+        elif idx + inc > N_GEN:
             link = Label(window, text="You've reached the end",font=('Courier', 15), fg="red", justify='left', wraplength=WIDTH, bd=-1)
             link.pack()
             link.place(x=0, y=50)
@@ -137,7 +144,7 @@ def main(args):
             link_list = []
             prompt_list = []
 
-            prompt = prompts[idx]
+            prompt = []
             prompt = Label(window, text=prompt,font=('Courier', 15), fg="yellow", justify='left', wraplength=0.9*WIDTH)
             prompt.place(x=10,y=line_index)
             prompt_list.append(prompt)
@@ -146,11 +153,13 @@ def main(args):
             cum_length += (prompt.winfo_width())%(0.9*WIDTH) 
             line_index += prompt.winfo_height() 
 
-            for i in range(len(large_sentence_pieces[idx, 0, :])):
+            for i in range(len(large_sentence_pieces[idx, :, 0])):
                 if JSD[idx][i]>0.5:
-                    link = Label(window, text=(small_sentence_pieces[idx, 0, i]).replace("▁", " "),font=('Courier', 15), fg="red", justify='left', wraplength=WIDTH, bd=-2)
+                    link = Label(window, text=(small_sentence_pieces[idx, i, 0]).replace("▁", " "),font=('Courier', 15), fg="red", justify='left', wraplength=WIDTH, bd=-2)
+                elif entropy_large[idx][i]<1.0:
+                    link = Label(window, text=(small_sentence_pieces[idx, i, 0]).replace("▁", " "),font=('Courier', 15), fg="orange", justify='left', wraplength=WIDTH, bd=-2)
                 else:
-                    link = Label(window, text=(small_sentence_pieces[idx, 0, i]).replace("▁", " "),font=('Courier', 15), fg="white", justify='left', wraplength=WIDTH, bd=-2)
+                    link = Label(window, text=(small_sentence_pieces[idx, i, 0]).replace("▁", " "),font=('Courier', 15), fg="white", justify='left', wraplength=WIDTH, bd=-2)
                 link.pack(padx=0, pady=0)
                 link.bind("<Button-1>", lambda e, idx=idx, i=i, link=link, w=cum_length, h=line_index:open_popup(idx, i, link, w, h))
                 link.place(x=cum_length, y=line_index)
