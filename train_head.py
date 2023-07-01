@@ -75,7 +75,7 @@ class DistancePredictionHead(nn.Module):
         for layer in self.layers:
             x = layer(x)
 
-        return torch.nn.functional.softmax(x, dim=-1)
+        return x
 
 
 class PrecomputedShardLoader:
@@ -230,6 +230,12 @@ def _preprocessor(
         # Some empty articles slipped through my filter. Sad!
         if(small_emb.shape[0] == 1):
             continue
+
+        print(small_emb.shape)
+        print(small_emb)
+        print(torch.sum(small_emb, dim=-1) > 0)
+        print(small_emb[3])
+        assert((torch.sum(small_emb, dim=-1) > 0).all())
 
         small_emb = small_emb.to(device=device, dtype=DTYPE)
         large_emb = large_emb.to(device=device, dtype=DTYPE)
