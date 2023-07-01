@@ -83,7 +83,7 @@ class pipeLLaMA(nn.Module):
         return x
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
-        x = _forward(idx)
+        x = self._forward(idx)
         logits = self.lm_head(x)  # (b, t, vocab_size)
 
         return logits
@@ -91,6 +91,7 @@ class pipeLLaMA(nn.Module):
     @classmethod
     def from_name(cls, name: str) -> Self:
         return cls(LLaMAConfig.from_name(name))
+
 
 class LLaMA(nn.Module):
     def __init__(self, config: LLaMAConfig) -> None:
