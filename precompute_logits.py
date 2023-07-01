@@ -16,7 +16,7 @@ from lit_llama.model import pipeLLaMA, LLaMAConfig
 from lit_llama.utils import EmptyInitOnDevice, jsd
 
 
-DTYPE = torch.float16
+DTYPE = torch.bfloat16
 DEVICE = torch.device('cuda:0')
 
 
@@ -30,6 +30,7 @@ def main(
     quantize: Optional[str] = None,
     output_shard_size: int = 2500,
     return_embeddings: bool = False,
+    return_initial_embeddings: bool = False,
     resume: bool = False,
 ) -> None:
     """Generates text samples based on a pre-trained LLaMA model and tokenizer.
@@ -45,6 +46,7 @@ def main(
             ``"gptq.int4"``: GPTQ 4-bit mode.
         output_shard_size: Number of outputs per output shard
         return_embeddings: Whether to skip the logit head and return raw embeddings
+        return_initial_embeddings: Whether to immediately return the sequence embedding
         resume: Quick and dirty resume functionality. DON'T CHANGE HYPERPARAMS.
     """
     if not checkpoint_path:
@@ -55,6 +57,12 @@ def main(
     assert checkpoint_path.is_file()
     assert tokenizer_path.is_file()
 
+    assert not (return_embeddings and return_initial_embeddings), \
+            "Only one of return_embeddings and return_initial_embeddings may be enabled"
+
+    # Create the output dir
+    os.makedirs(output_dir, exist_ok=True)
+
     # Initialize the tokenizer
     tokenizer = Tokenizer(tokenizer_path)
 
@@ -64,6 +72,9 @@ def main(
         device=DEVICE, dtype=DTYPE, quantization_mode=quantize
     ):
         t0 = time.time()
+#        model = LLaMA.from_name(model_size)
+#        checkpoint = torch.load(checkpoint_path)
+#        model.load_state_dict(checkpoint, strict=True)
         model = pipeLLaMA.from_name(model_size)
         partition_schedule = model.partition_schedule
         checkpoint = torch.load(checkpoint_path)
@@ -72,7 +83,7 @@ def main(
                 split = key.split('.')
                 split[2] = partition_schedule[int(split[2])]
                 checkpoint[".".join(split)] = checkpoint.pop(key)
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=True)
     print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
     model.eval()
@@ -129,11 +140,14 @@ def main(
         with torch.no_grad():
             fn = model.forward
             if(return_embeddings):
+                fn = model._forward
+            elif(return_initial_embeddings):
                 fn = model.embed_sequence
 
             logits = fn(encoded_prompt)
 
-        logits = logits.squeeze(0).cpu()
+        logits = logits.squeeze(0)
+        logits = logits.cpu()
         outputs[key] = logits
 
     if(len(outputs)):
