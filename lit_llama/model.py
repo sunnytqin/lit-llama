@@ -70,6 +70,11 @@ class pipeLLaMA(nn.Module):
         # forward the LLaMA model itself
         x = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
 
+        return x
+
+    def _forward(self, idx: torch.Tensor) -> torch.Tensor:
+        x = self.embed_sequence(idx)
+
         #for block in self.transformer.h:
         #    x = block(x).cuda(0)
         x = self.transformer.h(x).local_value().cuda(0)
@@ -78,7 +83,7 @@ class pipeLLaMA(nn.Module):
         return x
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
-        x = self.embed_sequence(x)
+        x = _forward(idx)
         logits = self.lm_head(x)  # (b, t, vocab_size)
 
         return logits
@@ -118,6 +123,11 @@ class LLaMA(nn.Module):
         # forward the LLaMA model itself
         x = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
 
+        return x
+
+    def _forward(self, idx: torch.Tensor) -> torch.Tensor:
+        x = self.embed_sequence(idx)
+
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -125,7 +135,7 @@ class LLaMA(nn.Module):
         return x
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
-        x = self.embed_sequence(idx)
+        x = self._forward(idx)
 
         logits = self.lm_head(x)  # (b, t, vocab_size)
 
