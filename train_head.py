@@ -231,12 +231,6 @@ def _preprocessor(
         if(small_emb.shape[0] == 1):
             continue
 
-        print(small_emb.shape)
-        print(small_emb)
-        print(torch.sum(small_emb, dim=-1) > 0)
-        print(small_emb[3])
-        assert((torch.sum(small_emb, dim=-1) > 0).all())
-
         small_emb = small_emb.to(device=device, dtype=DTYPE)
         large_emb = large_emb.to(device=device, dtype=DTYPE)
         
