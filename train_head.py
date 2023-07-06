@@ -333,8 +333,13 @@ def _wandb_setup(args):
 
     wandb.login()
 
+    wandb_config = {k:v for k,v in args.items()}
+    slurm_jobid = os.environ["SLURM_JOBID"]
+    if(slurm_jobid):
+        wandb_config["slurm_jobid"] = slurm_jobid
+
     wandb_run = wandb.init(
-        config=args,
+        config=wandb_config,
         **{k:args[v] for k, v in wandb_args.items()},
     )
 
