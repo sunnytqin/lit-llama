@@ -348,7 +348,7 @@ def main(
     skip_frac: float = 0.95,
     nonzero_bin_weight: float = 1.,
     no_bins: int = 2,
-    min_bin: float = -5.,
+    min_bin: float = -3.5,
     max_bin: float = np.log(np.log(2)), # JSD is bounded by ln(2)
     target_fn_name: str = "log_jsd",
     glue_lm_head: bool = False,
