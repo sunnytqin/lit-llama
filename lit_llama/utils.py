@@ -136,8 +136,8 @@ def jsd(net_1_logits, net_2_logits):
     net_2_probs_log = F.log_softmax(net_2_logits, dim=-1)
 
     total_m = 0.5 * (net_1_probs + net_2_probs)
-    loss = F.kl_div(total_m, net_1_probs_log, reduction="none", log_target=False)
-    loss += F.kl_div(total_m, net_2_probs_log, reduction="none", log_target=False)
+    loss = F.kl_div(total_m.log(), net_1_probs_log, reduction="none", log_target=True)
+    loss += F.kl_div(total_m.log(), net_2_probs_log, reduction="none", log_target=True)
     loss = 0.5 * loss.sum(dim=-1)
  
     return loss
