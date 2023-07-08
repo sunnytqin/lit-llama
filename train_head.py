@@ -33,6 +33,8 @@ wandb_metrics = set([
     ("val_accuracy", "step"),
 ])
 
+PAIRS = []
+
 
 class DistancePredictionHeadWithLMHead(nn.Module):
     def __init__(self,
@@ -206,8 +208,8 @@ def _preprocessor(
             large_logits = large_lm_head(large_emb)
 
             # Softmax both sets of logits
-            small_logits = torch.nn.functional.softmax(small_logits, dim=-1)
-            large_logits = torch.nn.functional.softmax(large_logits, dim=-1)
+            small_logits_softmax = torch.nn.functional.softmax(small_logits, dim=-1)
+            large_logits_softmax = torch.nn.functional.softmax(large_logits, dim=-1)
 
             # Compute the target
             if(target_fn_name == "log_jsd"):
@@ -216,8 +218,8 @@ def _preprocessor(
                 # We will predict the log of the divergence
                 target = torch.log(divergence)
             elif(target_fn_name == "small_entropy"):
-                logs = torch.log(small_logits)
-                small_entropy = torch.sum(-1 * small_logits * logs, dim=-1)
+                logs = torch.nn.functional.log_softmax(small_logits, dim=-1)
+                small_entropy = torch.sum(-1 * small_logits_softmax * logs, dim=-1)
                 target = small_entropy
             else:
                 raise ValueError("Invalid target name")

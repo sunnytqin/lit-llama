@@ -12,7 +12,7 @@ from lightning.fabric.strategies import DeepSpeedStrategy, FSDPStrategy
 from torch.distributed.fsdp import FullStateDictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import StateDictType
-from torch.functional import F
+import torch.nn.functional as F
 import torch.nn as nn
 
 llama_model_sizes = {
@@ -129,13 +129,18 @@ class EmptyInitOnDevice(torch.overrides.TorchFunctionMode):
         return func(*args, **kwargs)
 
 
-def jsd(net_1_probs, net_2_probs):
+def jsd(net_1_logits, net_2_logits):
+    net_1_probs = F.softmax(net_1_logits, dim=-1)
+    net_2_probs = F.softmax(net_2_logits, dim=-1)
+    net_1_probs_log = F.log_softmax(net_1_logits, dim=-1)
+    net_2_probs_log = F.log_softmax(net_2_logits, dim=-1)
+
     total_m = 0.5 * (net_1_probs + net_2_probs)
-    loss = torch.zeros(net_1_probs.shape[0], device=net_1_probs.device, dtype=net_1_probs.dtype)
-    loss += F.kl_div(net_1_probs.log(), total_m.log(), reduction="none", log_target=True).sum(dim=(-1))
-    loss += F.kl_div(net_2_probs.log(), total_m.log(), reduction="none", log_target=True).sum(dim=(-1))
+    loss = F.kl_div(total_m, net_1_probs_log, reduction="none", log_target=False)
+    loss += F.kl_div(total_m, net_2_probs_log, reduction="none", log_target=False)
+    loss = 0.5 * loss.sum(dim=-1)
  
-    return (0.5 * loss)
+    return loss
 
 # this is taken from torchhacks https://github.com/lernapparat/torchhacks
 
