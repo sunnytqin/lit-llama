@@ -11,6 +11,7 @@ from typing import Optional, Iterator, Tuple
 import warnings
 
 import lightning as L
+import numpy as np
 import torch
 import torch.nn as nn
 import wandb
@@ -348,7 +349,7 @@ def main(
     nonzero_bin_weight: float = 1.,
     no_bins: int = 2,
     min_bin: float = -5.,
-    max_bin: float = 0.,
+    max_bin: float = np.log(np.log(2)), # JSD is bounded by ln(2)
     target_fn_name: str = "log_jsd",
     glue_lm_head: bool = False,
     seed: int = 42,
