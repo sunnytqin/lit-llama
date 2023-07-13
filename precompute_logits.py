@@ -50,10 +50,14 @@ def main(
         resume: Quick and dirty resume functionality. DON'T CHANGE HYPERPARAMS.
     """
     if not checkpoint_path:
-        checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/state_dict.pth')
+        checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/lit-llama.pth')
+    else:
+        checkpoint_path = Path(checkpoint_path)
     if not tokenizer_path:
         tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model')
-    
+    else:
+        tokenizer_path = Path(tokenizer_path)
+   
     assert checkpoint_path.is_file()
     assert tokenizer_path.is_file()
 

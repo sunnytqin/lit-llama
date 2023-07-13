@@ -34,8 +34,6 @@ wandb_metrics = set([
     ("val_accuracy", "step"),
 ])
 
-PAIRS = []
-
 
 class DistancePredictionHeadWithLMHead(nn.Module):
     def __init__(self,
@@ -222,6 +220,10 @@ def _preprocessor(
                 logs = torch.nn.functional.log_softmax(small_logits, dim=-1)
                 small_entropy = torch.sum(-1 * small_logits_softmax * logs, dim=-1)
                 target = small_entropy
+            elif(target_fn_name == "large_entropy"):
+                logs = torch.nn.functional.log_softmax(large_logits, dim=-1)
+                large_entropy = torch.sum(-1 * large_logits_softmax * logs, dim=-1)
+                target = large_entropy
             else:
                 raise ValueError("Invalid target name")
 
@@ -276,6 +278,7 @@ def batch_loader(
 
     # Toss the last batch if it's too small
     pass
+
 
 def _wandb_setup(args):
     wandb_args = {
@@ -348,7 +351,7 @@ def main(
     skip_frac: float = 0.95,
     nonzero_bin_weight: float = 1.,
     no_bins: int = 2,
-    min_bin: float = -5,
+    min_bin: float = -7,
     max_bin: float = np.log(np.log(2)), # JSD is bounded by ln(2)
     target_fn_name: str = "log_jsd",
     glue_lm_head: bool = False,
@@ -418,9 +421,9 @@ def main(
         _wandb_setup(args)
 
     if not small_checkpoint_path:
-        small_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/7B/state_dict.pth')
+        small_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/7B/lit-llama.pth')
     if not large_checkpoint_path:
-        large_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/30B/state_dict.pth')
+        large_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/30B/lit-llama.pth')
 
     assert small_checkpoint_path.is_file()
     assert large_checkpoint_path.is_file()
