@@ -347,7 +347,7 @@ def main(
     activation: str = "relu",
     lr: float = 1e-6,
     batch_size: int = 64,
-    no_epochs: int = 5,
+    no_epochs: int = 10,
     skip_frac: float = 0.95,
     nonzero_bin_weight: float = 1.,
     no_bins: int = 2,
@@ -422,8 +422,12 @@ def main(
 
     if not small_checkpoint_path:
         small_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/7B/lit-llama.pth')
+    else:
+        small_checkpoint_path = Path(small_checkpoint_path)
     if not large_checkpoint_path:
         large_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/30B/lit-llama.pth')
+    else:
+        large_checkpoint_path = Path(large_checkpoint_path)
 
     assert small_checkpoint_path.is_file()
     assert large_checkpoint_path.is_file()
