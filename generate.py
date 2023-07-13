@@ -4,6 +4,7 @@ import warnings
 from pathlib import Path
 from typing import Optional
 import copy 
+import numpy as np
 
 import lightning as L
 import torch
@@ -46,7 +47,8 @@ def generate(
     empty[:, :T] = idx
     idx = empty
     probs_list = torch.empty(max_new_tokens, 32_000, dtype=DTYPE, device=idx.device)
-
+    top_k_indices = torch.empty(max_new_tokens, 5, dtype=torch.int)
+    top_k_probs = torch.empty(max_new_tokens, 5)
     # generate max_new_tokens tokens
     for t in range(T, T_new):
         # ignore the not-filled-yet tokens
@@ -73,12 +75,15 @@ def generate(
         probs = torch.nn.functional.softmax(logits, dim=-1)
         idx_next = torch.argmax(probs, dim=-1)
         # idx_next = torch.multinomial(probs, num_samples=1)
+        top_k = torch.topk(probs, 5, dim=-1)
+        top_k_probs[t-T, :] = top_k[0]
+        top_k_indices[t - T, :] = top_k[1]
 
         # concatenate the new column
         idx[:, t:] = idx_next
         probs_list[t - T, :] = probs.squeeze()
 
-    return idx, probs_list
+    return idx, probs_list, (top_k_probs, top_k_indices)
 
 
 def main(
@@ -86,7 +91,7 @@ def main(
     *,
     model_size: str = "7B",
     num_samples: int = 1,
-    max_new_tokens: int = 50,
+    max_new_tokens: int = 20,
     top_k: int = 200,
     temperature: float = 1.0, # fix to lowest temperature
     checkpoint_path: Optional[Path] = None,
@@ -117,7 +122,7 @@ def main(
     assert tokenizer_path.is_file()
 
     large_model_size = "30B"
-    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{large_model_size}/state_dict.pth" 
+    large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/checkpoints/lit-llama/{large_model_size}/state_dict.pth" 
     
     device_large = torch.device('cuda:0')
     device_small = torch.device('cuda:2')
@@ -153,7 +158,14 @@ def main(
     small_model.eval()
 
     tokenizer = Tokenizer(tokenizer_path)
-    
+
+    small_sentence_probs_meta = []
+    large_sentence_probs_meta = []
+    small_sentence_pieces_meta = []
+    large_sentence_pieces_meta = []
+    JSD_meta = []
+    prompts_meta = []
+
     while True: 
 
         prompt = input("Type prompt (or 'exit'): ")
@@ -168,7 +180,7 @@ def main(
         # L.seed_everything(1234)
 
         t0 = time.perf_counter()
-        y, probs = generate(
+        y, probs, top_k = generate(
             small_model,
             encoded_prompt,
             max_new_tokens,
@@ -182,25 +194,32 @@ def main(
         # print(f"\n\nTime for inference: {t:.02f} sec total, {num_samples * max_new_tokens / t:.02f} tokens/sec", file=sys.stderr)
         # print(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB", file=sys.stderr)
         y_compare = [*encoded_prompt[0]]
-        probs_compare = torch.empty(max_new_tokens, 32_000, dtype=DTYPE, device=encoded_prompt.device)
+        probs_compare = torch.empty(max_new_tokens, 32_000, dtype=torch.bfloat16, device=encoded_prompt.device)
+        top_k_probs, top_k_indices = top_k
+        top_k_indices_compare = torch.empty_like(top_k_indices, dtype=torch.int)
+        top_k_probs_compare = torch.empty_like(top_k_probs)
         for t in range(len_prompt, len(y)):
             encoded_prompt_large = y[0: t][None, :].to(device_large)
 
             print(large_model.config.block_size)
 
             t0 = time.perf_counter()
-            y_large, probs_large = generate(
+            y_large, probs_large, top_k_large = generate(
                 large_model,
                 encoded_prompt_large,
-                1,
+                1, #max new token is limited to 1
                 large_model.config.block_size,  # type: ignore[union-attr,arg-type]
                 temperature=temperature,
                 top_k=top_k,
             )
 
             y_large = y_large[0]  # unpack batch dimension
-            y_compare.append(y_large[-1].detach().int())
+            y_compare.append(y_large[-1].detach().int().to(cuda2))
             probs_compare[t - len_prompt, :] = probs_large.squeeze()
+
+            top_k_indices_compare[t - len_prompt, :] = top_k_large[1]
+            top_k_probs_compare[t - len_prompt, :] = top_k_large[0]
+        y_compare = torch.stack(y_compare, dim=0)
 
         t = time.perf_counter() - t0
 
@@ -208,25 +227,43 @@ def main(
         distance = jsd(probs, probs_compare)
         print(f"distance: {distance.shape}")
         distance = distance.tolist()
+        JSD_meta.append(distance)
 
-        print(f"[{prompt}]", end=" ")
-        for i in range(len_prompt, len_prompt + max_new_tokens):
-            small_token = tokenizer.decode(y[i]).replace("\n","\\n")
-            large_token = tokenizer.decode(y_compare[i]).replace("\n","\\n")
-            if small_token!=large_token:
-                print(f"{small_token}({large_token})", end=' ')
-            else:
-                print(f"{small_token}", end=' ')
-        print('\n')
+        # topk prediction
+        small_sentence_pieces_j = []
+        large_sentence_pieces_j = []
+        for j in range(5):
+            small_sentence = tokenizer.decode(top_k_indices_compare[:, j])#.replace("\n","\\n")
+            large_sentence = tokenizer.decode(top_k_indices[:, j])#.replace("\n","\\n")
 
-        print(f"[{prompt}]", end=" ")
-        for i in range(len_prompt, len_prompt + max_new_tokens):
-            small_token = tokenizer.decode(y[i]).replace("\n","\\n")
-            print(f"{small_token}({distance[i - len_prompt]:.3f})", end=' ')
-        print('\n')
+            small_sentence_pieces_j.append([p.piece for p in small_sentence.pieces])
+            large_sentence_pieces_j.append([p.piece for p in large_sentence.pieces])
+
+        small_sentence_pieces_meta.append(small_sentence_pieces_j)
+        large_sentence_pieces_meta.append(large_sentence_pieces_j)
+
+        small_sentence_probs_meta.append(top_k_probs.numpy())
+        large_sentence_probs_meta.append(top_k_probs_compare.numpy())
+
+        # # top1 prediction
+        # small_sentence = tokenizer.decode(y)#.replace("\n","\\n")
+        # large_sentence = tokenizer.decode(y_compare)#.replace("\n","\\n")
+        
+        # for i, (sp, bp) in enumerate(zip(small_sentence.pieces[len_prompt:], large_sentence.pieces[len_prompt:])):
+        #     if sp.id == bp.id:
+        #         print(f"{sp.piece}({torch.max(probs[i]):.2f}), {bp.piece}({torch.max(probs_compare[i]):.2f})")
+        #         # print('piece="{}" surface="{}" id={} begin={} end={}'.format(n.piece, n.surface, n.id, n.begin, n.end))
 
     
 
+    np.savez("sample_output/user_input.npz",
+             small_sentence_probs=np.array(small_sentence_probs_meta),
+             large_sentence_probs=np.array(large_sentence_probs_meta),
+             small_sentence_pieces=np.array(small_sentence_pieces_meta),
+             large_sentence_pieces=np.array(large_sentence_pieces_meta),
+             JSD=JSD_meta,
+             prompts=prompts_meta
+             )
 
 if __name__ == "__main__":
     from jsonargparse import CLI
