@@ -40,8 +40,15 @@ class Tokenizer:
 
         return torch.tensor(tokens, dtype=torch.int, device=device)
 
+    def sp_encode(
+        self,
+        string: str,
+    ) -> tuple:
+        tokens = self.processor.encode(string, out_type='immutable_proto')
+        return tokens
+
     def decode(self, tokens: torch.Tensor) -> str:
-        return self.processor.decode(tokens.tolist())
+        return self.processor.decode(tokens.tolist(), out_type='immutable_proto')
 
     @staticmethod
     def train(input: str, destination: str, vocab_size=32000) -> None:

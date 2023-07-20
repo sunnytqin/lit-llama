@@ -4,6 +4,7 @@ Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT.
 """
 # mypy: ignore-errors
 import math
+import sys
 from dataclasses import dataclass
 import tempfile
 
