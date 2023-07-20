@@ -7,7 +7,6 @@ import pickle
 import random
 import sys
 import time
-from typing import Optional, Iterator, Tuple
 import warnings
 
 import lightning as L
@@ -17,13 +16,19 @@ import torch.nn as nn
 import wandb
 
 from lit_llama import LLaMA, Tokenizer
-from lit_llama.model import pipeLLaMA, LLaMAConfig
-from lit_llama.utils import EmptyInitOnDevice, jsd
-from train_head_utils import PrecomputedShardLoader, load_lm_head
+from train_head_utils import (
+    batch_loader,
+    DistancePredictionHead,
+    DistancePredictionHeadWithLMHead,
+    load_lm_head,
+    PrecomputedShardLoader,
+    _preprocessor,
+)
 
 
 DTYPE = torch.float32
 DEVICE = torch.device("cuda:0")
+
 # WandB x axis
 WANDB_STEP_METRICS = set(["step", "epoch"])
 # WandB y, x pairs
@@ -33,251 +38,6 @@ wandb_metrics = set([
     ("val_loss", "step"),
     ("val_accuracy", "step"),
 ])
-
-
-class DistancePredictionHeadWithLMHead(nn.Module):
-    def __init__(self,
-        lm_head: nn.Linear,
-        no_bins: int,
-        hidden_dim: int,
-        no_hidden_layers: int,
-        dropout: float,
-        log_scale: bool = True,
-        activation: str = "relu",
-    ):
-        super().__init__()
-        self.input_dim = lm_head.weight.shape[1]
-        self.token_dim = lm_head.weight.shape[0]
-        self.no_bins = no_bins
-        self.hidden_dim = hidden_dim
-        self.no_hidden_layers = no_hidden_layers
-        self.dropout = dropout
-        self.log_scale = log_scale
-
-        if activation == "relu":
-            activation_class = nn.ReLU
-        else:
-            raise ValueError(f"Unknown activation: {activation}")
-
-        self.layers = nn.ModuleList()
-
-        has_bias = lm_head.bias is not None
-        local_lm_head = nn.Linear(self.input_dim, self.token_dim, bias=has_bias)
-        with torch.no_grad():
-            local_lm_head.weight.copy_(lm_head.weight)
-            if(has_bias):
-                local_lm_head.bias.copy_(lm_head.bias)
-
-        self.layers.append(local_lm_head)
-
-        if(no_hidden_layers == 0):
-            self.layers.append(nn.Linear(self.token_dim, no_bins))
-        else:
-            self.layers.append(nn.Linear(self.token_dim, hidden_dim))
-            self.layers.append(nn.Dropout(dropout))
-            self.layers.append(activation_class())
-            for _ in range(no_hidden_layers - 1):
-                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
-                self.layers.append(nn.Dropout(dropout))
-                self.layers.append(activation_class())
-
-            self.layers.append(nn.Linear(hidden_dim, no_bins))
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-
-        return x
-
-
-class DistancePredictionHead(nn.Module):
-    def __init__(self,
-        input_dim: int,
-        no_bins: int,
-        hidden_dim: int,
-        no_hidden_layers: int,
-        dropout: float,
-        log_scale: bool = True,
-        activation: str = "relu",
-    ):
-        super().__init__()
-        self.input_dim = input_dim
-        self.no_bins = no_bins
-        self.hidden_dim = hidden_dim
-        self.no_hidden_layers = no_hidden_layers
-        self.dropout = dropout
-        self.log_scale = log_scale
-
-        if activation == "relu":
-            activation_class = nn.ReLU
-        else:
-            raise ValueError(f"Unknown activation: {activation}")
-
-        self.layers = nn.ModuleList()
-
-        if(no_hidden_layers == 0):
-            self.layers.append(nn.Linear(input_dim, no_bins))
-        else:
-            self.layers.append(nn.Linear(input_dim, hidden_dim))
-            self.layers.append(nn.Dropout(dropout))
-            self.layers.append(activation_class())
-            for _ in range(no_hidden_layers - 1):
-                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
-                self.layers.append(nn.Dropout(dropout))
-                self.layers.append(activation_class())
-
-            self.layers.append(nn.Linear(hidden_dim, no_bins))
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-
-        return x
-
-
-def _discretize(
-    values: torch.Tensor, 
-    no_bins: int, 
-    mi: float, 
-    ma: float
-):
-    """
-        Discretizes the target into `no_bins` bins.
-    """
-    assert(mi < ma)
-    assert(no_bins > 0)
-
-    # Clamp the values to the range [mi, ma]
-    values = torch.clamp(values, min=mi, max=ma)
-
-    boundaries = torch.linspace(
-        mi, ma, no_bins + 1, device=values.device
-    )
-    boundaries[..., -1] = float('inf')
-
-    # Make shapes compatible
-    boundaries = boundaries.view(*([1]*len(values.shape)), -1)
-    values = values.unsqueeze(-1)
-
-    lt = boundaries[..., :-1] <= values
-    gt = boundaries[..., 1:] > values
-    bin_id = torch.logical_and(lt, gt).to(torch.int64).argmax(dim=-1)
-    
-    return bin_id
-
-
-def _preprocessor(
-    shard_loader: PrecomputedShardLoader,
-    small_lm_head: nn.Linear,
-    large_lm_head: nn.Linear,
-    no_bins: int,
-    min_bin: float,
-    max_bin: float,
-    device: torch.device,
-    target_fn_name="log_jsd",
-):
-    for i, shard_tups in enumerate(shard_loader):
-        small_tup, large_tup = shard_tups[:2]
-
-        small_key, small_emb = small_tup
-        large_key, large_emb = large_tup
-
-        if(len(shard_tups) == 3):
-            input_key, input_emb = shard_tups[2]
-        elif(len(shard_tups) == 2):
-            input_key, input_emb = small_tup
-        else:
-            raise ValueError("Something went wrong...")
-
-        # Sanity check. The shards should be aligned such that the keys match.
-        keys = set([t[0] for t in shard_tups])
-        assert(len(keys) == 1)
-
-        # Some empty articles slipped through my filter. Sad!
-        if(small_emb.shape[0] == 1):
-            continue
-
-        small_emb = small_emb.to(device=device, dtype=DTYPE)
-        large_emb = large_emb.to(device=device, dtype=DTYPE)
-        input_emb = input_emb.to(device=device, dtype=DTYPE)
-
-        with torch.no_grad():
-            # Compute logits from the small model embeddings
-            small_logits = small_lm_head(small_emb)
-            large_logits = large_lm_head(large_emb)
-
-            # Softmax both sets of logits
-            small_logits_softmax = torch.nn.functional.softmax(small_logits, dim=-1)
-            large_logits_softmax = torch.nn.functional.softmax(large_logits, dim=-1)
-
-            # Compute the target
-            if(target_fn_name == "log_jsd"):
-                divergence = jsd(small_logits, large_logits)
-
-                # We will predict the log of the divergence
-                target = torch.log(divergence)
-            elif(target_fn_name == "small_entropy"):
-                logs = torch.nn.functional.log_softmax(small_logits, dim=-1)
-                small_entropy = torch.sum(-1 * small_logits_softmax * logs, dim=-1)
-                target = small_entropy
-            elif(target_fn_name == "large_entropy"):
-                logs = torch.nn.functional.log_softmax(large_logits, dim=-1)
-                large_entropy = torch.sum(-1 * large_logits_softmax * logs, dim=-1)
-                target = large_entropy
-            else:
-                raise ValueError("Invalid target name")
-
-            # Discretize the target
-            target = _discretize(
-                target,
-                no_bins, 
-                mi=min_bin, 
-                ma=max_bin,
-            ).squeeze(0)
-
-        yield (input_emb, target)
-
-
-def batch_loader(
-    data_gen: Iterator[Tuple[torch.Tensor, torch.Tensor]],
-    batch_size: int,
-    skip_frac: float,
-    nonzero_bin_weight: float = 1.,
-):
-    batch = []
-    for i, (small_emb, target) in enumerate(data_gen):
-        # [N, emb_dim]
-        assert(len(small_emb.shape) == 2)
-        inputs = torch.unbind(small_emb, dim=-2)
-
-        # [N]
-        assert(len(target.shape) == 1)
-        targets = torch.unbind(target, dim=-1)
-
-        assert(len(inputs) == len(targets))
-
-        for inp, target in zip(inputs, targets):
-            weighted_skip_frac = skip_frac / (nonzero_bin_weight if target != 0 else 1.)
-
-            # We don't want too many consecutive tokens from the same prompt,
-            # so we skip a large percentage of them.
-            if(random.random() < weighted_skip_frac):
-                continue
-
-            batch.append((inp, target))
-
-            if(len(batch) == batch_size):
-                inputs = torch.stack([t[0] for t in batch])
-                targets = torch.stack([t[1] for t in batch])
-
-                assert(inputs.device == targets.device)
-
-                yield inputs, targets
-
-                batch = []
-
-    # Toss the last batch if it's too small
-    pass
 
 
 def _wandb_setup(args):
@@ -332,6 +92,11 @@ def _wandb_log(metrics, step_metric, step):
     wandb.log(metrics)
 
 
+def _validate_args(args):
+    if(args["glue_lm_head"] and args["provide_entropy_as_input"]):
+        raise ValueError("Cannot provide entropy as input using glue_lm_head")
+
+
 def main(
     *,
     precomputed_small_emb_dir: str,
@@ -350,12 +115,16 @@ def main(
     no_epochs: int = 10,
     skip_frac: float = 0.95,
     nonzero_bin_weight: float = 1.,
+    bin_target: bool = True,
     no_bins: int = 2,
     min_bin: float = -7,
     max_bin: float = np.log(np.log(2)), # JSD is bounded by ln(2)
     target_fn_name: str = "log_jsd",
     glue_lm_head: bool = False,
     seed: int = 42,
+    min_entropy: float = None,
+    max_entropy: float = None,
+    provide_entropy_as_input: bool = False,
     precomputed_small_emb_dir_val: str = None,
     precomputed_large_emb_dir_val: str = None,
     precomputed_head_input_emb_dir_val: str = None,
@@ -402,6 +171,8 @@ def main(
 
     torch.manual_seed(seed)
     random.seed(seed)
+
+    _validate_args(args)
 
     # Make the output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -472,18 +243,23 @@ def main(
 
     # Initialize the model
     shared_head_params = {
-        "no_bins": no_bins,
+        "no_bins": no_bins if bin_target else 1,
         "hidden_dim": hidden_dim,
         "no_hidden_layers": no_hidden_layers,
         "dropout": dropout,
         "activation": activation,
     }
     if(not glue_lm_head):
+        input_dim = small_lm_head.weight.shape[1]
+        if(provide_entropy_as_input):
+            input_dim += 1
+
         distance_prediction_head = DistancePredictionHead(
-            input_dim=small_lm_head.weight.shape[1],
+            input_dim=input_dim,
             **shared_head_params,
         )
     else:
+        assert(not provide_entropy_as_input)
         distance_prediction_head = DistancePredictionHeadWithLMHead(
             lm_head=small_lm_head,
             **shared_head_params,
@@ -505,7 +281,15 @@ def main(
     )
 
     # Select the loss function
-    loss_fn = torch.nn.functional.cross_entropy
+    if(bin_target):
+        loss_fn = lambda inputs, targets: torch.nn.functional.cross_entropy(
+            inputs, targets.long()
+        )
+    else:
+        # Remove the vestigial "bin" dimension
+        loss_fn = lambda inputs, targets: torch.nn.functional.mse_loss(
+            inputs.squeeze(-1), targets.to(dtype=DTYPE)
+        )
 
     # Standard training loop
     cum_step = 0
@@ -523,7 +307,11 @@ def main(
             no_bins=no_bins,
             min_bin=min_bin,
             max_bin=max_bin,
+            min_entropy=min_entropy,
+            max_entropy=max_entropy,
+            provide_entropy_as_input=provide_entropy_as_input,
             target_fn_name=target_fn_name,
+            bin_target=bin_target,
             device=DEVICE,
         )
 
@@ -548,7 +336,11 @@ def main(
                     no_bins=no_bins,
                     min_bin=min_bin,
                     max_bin=max_bin,
+                    min_entropy=min_entropy,
+                    max_entropy=max_entropy,
+                    provide_entropy_as_input=provide_entropy_as_input,
                     target_fn_name=target_fn_name,
+                    bin_target=bin_target,
                     device=DEVICE,
                 )
 
@@ -569,59 +361,65 @@ def main(
                         val_targets = val_targets.to(DEVICE)
 
                         val_inputs = val_inputs.to(torch.float32)
-                        val_targets = val_targets.to(torch.int64)
 
                         val_outputs = distance_prediction_head(val_inputs)
                         val_loss = loss_fn(val_outputs, val_targets)
                         val_loss_sum += torch.sum(val_loss).item()
 
-                        val_preds = torch.argmax(val_outputs, dim=-1)
-
-                        val_acc = val_preds == val_targets
-                        val_acc_sum += torch.mean(val_acc.float()).item()
+                        if(bin_target):
+                            val_preds = torch.argmax(val_outputs, dim=-1)
+                            val_acc = val_preds == val_targets
+                            val_acc_sum += torch.mean(val_acc.float()).item()
+                        else:
+                            val_preds = val_outputs
 
                         val_batch_count += 1
 
                         all_val_preds.extend(val_preds.cpu().tolist())
                         all_val_gt.extend(val_targets.cpu().tolist())
 
-                    confusion_matrix = torch.zeros(no_bins, no_bins)
-                    for gt, pred in zip(all_val_gt, all_val_preds):
-                        confusion_matrix[gt, pred] += 1
-
-                    confusion_matrix = confusion_matrix / (confusion_matrix.sum() + 1e-6)
-
                     val_metrics = {
                         "val_loss": val_loss_sum / val_batch_count,
-                        "val_accuracy": val_acc_sum / val_batch_count,
-                        f"val_confusion_matrix_{no_bins}": confusion_matrix,
                     }
 
-                    for k,v in val_metrics.items():
-                        print(f"Validation metric {k}: {v}")
+                    print(f"Validation metric val_loss: {val_metrics['val_loss']}")
+
+                    if(bin_target):
+                        confusion_matrix = torch.zeros(no_bins, no_bins)
+                        for gt, pred in zip(all_val_gt, all_val_preds):
+                            confusion_matrix[gt, pred] += 1
+
+                        confusion_matrix = confusion_matrix / (confusion_matrix.sum() + 1e-6)
+
+                        val_metrics.update({
+                            "val_accuracy": val_acc_sum / val_batch_count,
+                            f"val_confusion_matrix_{no_bins}": confusion_matrix,
+                        })
+
+                        print(f"Validation metric val_accuracy: {val_metrics['val_accuracy']}")
+
+                        if(use_wandb):
+                            # Make a nice WandB confusion matrix
+                            val_metrics[f"val_confusion_matrix_{no_bins}"] = wandb.plot.confusion_matrix(
+                                y_true=all_val_gt,
+                                preds=all_val_preds,
+                                class_names=[str(label) for label in range(no_bins)],
+                            )
+
+                            # Annoyingly, WandB doesn't support plotting confusion matrices over time
+                            # We need to add those values separately
+                            for row in range(no_bins):
+                                for col in range(no_bins):
+                                    val_metrics[f"val_confusion_matrix_{no_bins}_{row}_{col}"] = (
+                                        confusion_matrix[row,col]
+                                    )
 
                     if(use_wandb):
-                        # Make a nice WandB confusion matrix
-                        val_wandb_metrics = val_metrics
-
-                        val_wandb_metrics[f"val_confusion_matrix_{no_bins}"] = wandb.plot.confusion_matrix(
-                            y_true=all_val_gt,
-                            preds=all_val_preds,
-                            class_names=[str(label) for label in range(no_bins)],
-                        )
-
-                        # Annoyingly, WandB doesn't support plotting confusion matrices over time
-                        # We need to add those values separately
-                        for row in range(no_bins):
-                            for col in range(no_bins):
-                                val_wandb_metrics[f"val_confusion_matrix_{no_bins}_{row}_{col}"] = (
-                                    confusion_matrix[row,col]
-                                )
-
-                        _wandb_log(metrics=val_wandb_metrics, step_metric="step", step=cum_step)
+                        _wandb_log(metrics=val_metrics, step_metric="step", step=cum_step)
 
             inputs = inputs.to(device=DEVICE, dtype=DTYPE)
-            targets = targets.to(device=DEVICE, dtype=torch.int64)
+            # Hold off on cast until the loss fn
+            targets = targets.to(device=DEVICE)
 
             optimizer.zero_grad()
             outputs = distance_prediction_head(inputs)
@@ -629,21 +427,26 @@ def main(
             loss.backward()
             optimizer.step()
 
-            accuracy = torch.sum(
-                torch.argmax(outputs, dim=-1) == targets
-            ) / targets.numel()
-
             metrics = {
                 "train_loss": loss.item(),
-                "train_accuracy": accuracy.item(),
             }
+
+            if(bin_target):
+                accuracy = torch.sum(
+                    torch.argmax(outputs, dim=-1) == targets
+                ) / targets.numel()
+
+                metrics.update({
+                    "train_accuracy": accuracy.item(),
+                })
 
             if(use_wandb):
                 _wandb_log(metrics=metrics, step_metric="step", step=cum_step)
 
             if i % 100 == 0:
                 print(f"Epoch {epoch}, batch {i}, loss: {loss.item():.02f}", file=sys.stderr)
-                print(f"Epoch {epoch}, batch {i}, accuracy: {accuracy.item():.02f}", file=sys.stderr)
+                if(bin_target):
+                    print(f"Epoch {epoch}, batch {i}, accuracy: {accuracy.item():.02f}", file=sys.stderr)
 
             cum_step += 1
 

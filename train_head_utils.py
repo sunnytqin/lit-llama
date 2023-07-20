@@ -3,9 +3,16 @@ import os
 import pickle
 import random
 import time
+from typing import Optional, Iterator, Tuple
 
 import torch
 import torch.nn as nn
+
+from lit_llama.utils import EmptyInitOnDevice, jsd
+
+
+DTYPE = torch.float32
+DEVICE = torch.device("cuda:0")
 
 
 class PrecomputedShardLoader:
@@ -108,3 +115,291 @@ def load_lm_head(checkpoint_path: str, dtype: torch.dtype, device: str):
     del checkpoint
 
     return lm_head
+
+
+class DistancePredictionHeadWithLMHead(nn.Module):
+    def __init__(self,
+        lm_head: nn.Linear,
+        no_bins: int,
+        hidden_dim: int,
+        no_hidden_layers: int,
+        dropout: float,
+        log_scale: bool = True,
+        activation: str = "relu",
+    ):
+        super().__init__()
+        self.input_dim = lm_head.weight.shape[1]
+        self.token_dim = lm_head.weight.shape[0]
+        self.no_bins = no_bins
+        self.hidden_dim = hidden_dim
+        self.no_hidden_layers = no_hidden_layers
+        self.dropout = dropout
+        self.log_scale = log_scale
+
+        if activation == "relu":
+            activation_class = nn.ReLU
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        self.layers = nn.ModuleList()
+
+        has_bias = lm_head.bias is not None
+        local_lm_head = nn.Linear(self.input_dim, self.token_dim, bias=has_bias)
+        with torch.no_grad():
+            local_lm_head.weight.copy_(lm_head.weight)
+            if(has_bias):
+                local_lm_head.bias.copy_(lm_head.bias)
+
+        self.layers.append(local_lm_head)
+
+        if(no_hidden_layers == 0):
+            self.layers.append(nn.Linear(self.token_dim, no_bins))
+        else:
+            self.layers.append(nn.Linear(self.token_dim, hidden_dim))
+            self.layers.append(nn.Dropout(dropout))
+            self.layers.append(activation_class())
+            for _ in range(no_hidden_layers - 1):
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+                self.layers.append(nn.Dropout(dropout))
+                self.layers.append(activation_class())
+
+            self.layers.append(nn.Linear(hidden_dim, no_bins))
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+
+        return x
+
+
+class DistancePredictionHead(nn.Module):
+    def __init__(self,
+        input_dim: int,
+        no_bins: int,
+        hidden_dim: int,
+        no_hidden_layers: int,
+        dropout: float,
+        log_scale: bool = True,
+        activation: str = "relu",
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.no_bins = no_bins
+        self.hidden_dim = hidden_dim
+        self.no_hidden_layers = no_hidden_layers
+        self.dropout = dropout
+        self.log_scale = log_scale
+
+        if activation == "relu":
+            activation_class = nn.ReLU
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        self.layers = nn.ModuleList()
+
+        if(no_hidden_layers == 0):
+            self.layers.append(nn.Linear(input_dim, no_bins))
+        else:
+            self.layers.append(nn.Linear(input_dim, hidden_dim))
+            self.layers.append(nn.Dropout(dropout))
+            self.layers.append(activation_class())
+            for _ in range(no_hidden_layers - 1):
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+                self.layers.append(nn.Dropout(dropout))
+                self.layers.append(activation_class())
+
+            self.layers.append(nn.Linear(hidden_dim, no_bins))
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+
+        return x
+
+
+def discretize(
+    values: torch.Tensor, 
+    no_bins: int, 
+    mi: float, 
+    ma: float
+):
+    """
+        Discretizes the target into `no_bins` bins.
+    """
+    assert(mi < ma)
+    assert(no_bins > 0)
+
+    # Clamp the values to the range [mi, ma]
+    values = torch.clamp(values, min=mi, max=ma)
+
+    boundaries = torch.linspace(
+        mi, ma, no_bins + 1, device=values.device
+    )
+    boundaries[..., -1] = float('inf')
+
+    # Make shapes compatible
+    boundaries = boundaries.view(*([1]*len(values.shape)), -1)
+    values = values.unsqueeze(-1)
+
+    lt = boundaries[..., :-1] <= values
+    gt = boundaries[..., 1:] > values
+    bin_id = torch.logical_and(lt, gt).to(torch.int64).argmax(dim=-1)
+    
+    return bin_id
+
+
+def _preprocessor(
+    shard_loader: PrecomputedShardLoader,
+    small_lm_head: nn.Linear,
+    large_lm_head: nn.Linear,
+    no_bins: int,
+    min_bin: float,
+    max_bin: float,
+    min_entropy: float,
+    max_entropy: float,
+    provide_entropy_as_input: bool,
+    device: torch.device,
+    target_fn_name="log_jsd",
+    bin_target: bool = True,
+    _stash=None,
+):
+    _stash_contents = {}
+    for i, shard_tups in enumerate(shard_loader):
+        small_tup, large_tup = shard_tups[:2]
+
+        small_key, small_emb = small_tup
+        large_key, large_emb = large_tup
+
+        if(len(shard_tups) == 3):
+            input_key, input_emb = shard_tups[2]
+        elif(len(shard_tups) == 2):
+            input_key, input_emb = small_tup
+        else:
+            raise ValueError("Something went wrong...")
+
+        # Sanity check. The shards should be aligned such that the keys match.
+        keys = set([t[0] for t in shard_tups])
+        assert(len(keys) == 1)
+
+        # Some empty articles slipped through my filter. Sad!
+        if(small_emb.shape[0] == 1):
+            continue
+
+        small_emb = small_emb.to(device=device, dtype=DTYPE)
+        large_emb = large_emb.to(device=device, dtype=DTYPE)
+        input_emb = input_emb.to(device=device, dtype=DTYPE)
+
+        with torch.no_grad():
+            # Compute logits from the small model embeddings
+            small_logits = small_lm_head(small_emb)
+            large_logits = large_lm_head(large_emb)
+
+            # Softmax both sets of logits
+            small_logits_softmax = torch.nn.functional.softmax(small_logits, dim=-1)
+            large_logits_softmax = torch.nn.functional.softmax(large_logits, dim=-1)
+
+            small_logs = torch.nn.functional.log_softmax(small_logits, dim=-1)
+            small_entropy = torch.sum(-1 * small_logits_softmax * small_logs, dim=-1)
+            large_logs = torch.nn.functional.log_softmax(large_logits, dim=-1)
+            large_entropy = torch.sum(-1 * large_logits_softmax * large_logs, dim=-1)
+
+            if((min_entropy is not None) and (max_entropy is not None)):
+                filt = torch.logical_and(
+                    small_entropy >= min_entropy,
+                    small_entropy < max_entropy,
+                )
+            elif((min_entropy is None) ^ (max_entropy is None)):
+                raise ValueError("Either none or both of min_entropy and max_entropy must be specified")
+            else:
+                filt = torch.ones_like(small_entropy)
+
+            def _unpack(tensor):
+                return [t.item() for t in tensor.cpu().unbind()]
+
+            _stash_contents.setdefault("small_entropy", []).extend(_unpack(small_entropy))
+            _stash_contents.setdefault("large_entropy", []).extend(_unpack(large_entropy))
+
+            # Compute the target
+            if(target_fn_name == "log_jsd"):
+                divergence = jsd(small_logits, large_logits)
+
+                # We will predict the log of the divergence
+                target = torch.log(divergence)
+
+                _stash_contents.setdefault("divergence", []).extend(_unpack(divergence))
+            elif(target_fn_name == "small_entropy"):
+                target = small_entropy
+            elif(target_fn_name == "large_entropy"):
+                target = large_entropy
+            else:
+                raise ValueError("Invalid target name")
+
+            if(bin_target):
+                # Discretize the target
+                target = discretize(
+                    target,
+                    no_bins, 
+                    mi=min_bin, 
+                    ma=max_bin,
+                ).squeeze(0)
+
+        inputs_filtered = [emb for f, emb in zip(filt, input_emb) if f]
+        if(len(inputs_filtered) == 0):
+            continue
+        input_emb = torch.stack(inputs_filtered)
+        targets_filtered = [tar for f, tar in zip(filt, target) if f]
+        target = torch.stack(targets_filtered)
+
+        if(provide_entropy_as_input):
+            entropy_filtered = [ent for f, ent in zip(filt, small_entropy) if f]
+            entropy_filtered = torch.stack(entropy_filtered)
+            input_emb = torch.cat([input_emb, entropy_filtered.unsqueeze(-1)], dim=-1)
+
+        yield (input_emb, target)
+
+    if(_stash is not None):
+        _stash.update(_stash_contents)
+
+
+def batch_loader(
+    data_gen: Iterator[Tuple[torch.Tensor, torch.Tensor]],
+    batch_size: int,
+    skip_frac: float,
+    nonzero_bin_weight: float = 1.,
+):
+    def _package_batch(batch):
+        inputs = torch.stack([t[0] for t in batch])
+        targets = torch.stack([t[1] for t in batch])
+
+        assert(inputs.device == targets.device)
+
+        return inputs, targets
+
+    batch = []
+    for i, (small_emb, target) in enumerate(data_gen):
+        # [N, emb_dim]
+        assert(len(small_emb.shape) == 2)
+        inputs = torch.unbind(small_emb, dim=-2)
+
+        # [N]
+        assert(len(target.shape) == 1)
+        targets = torch.unbind(target, dim=-1)
+
+        assert(len(inputs) == len(targets))
+
+        for inp, target in zip(inputs, targets):
+            weighted_skip_frac = skip_frac / (nonzero_bin_weight if target != 0 else 1.)
+
+            # We don't want too many consecutive tokens from the same prompt,
+            # so we skip a large percentage of them.
+            if(random.random() < weighted_skip_frac):
+                continue
+
+            batch.append((inp, target))
+
+            if(len(batch) == batch_size):
+                yield _package_batch(batch)
+                batch = []
+
+    # Serve the final batch, even if it's not full
+    yield _package_batch(batch)
