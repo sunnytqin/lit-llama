@@ -93,12 +93,17 @@ class PrecomputedShardLoader:
             for i in range(len(loaded_shards)):
                 loaded_shards[i] = sort_shard(loaded_shards[i])
 
+            # Remove empty articles
+            for i in range(len(loaded_shards)):
+                loaded_shards[i] = [(k,v) for k,v in loaded_shards[i] if len(v) > 1]
+
             if(self.filter):
                 # Filter out examples that don't pass the filter
                 for i in range(len(loaded_shards)):
                     shard = loaded_shards[i]
-                    for k in shard:
-                        shard[k] = shard[k][self.filter[k].bool()]
+                    for j in range(len(shard)):
+                        k, v = shard[j]
+                        shard[j] = (k, v[self.filter[k].bool()])
             
             yield from zip(*loaded_shards)
 
@@ -295,7 +300,7 @@ def _preprocessor(
         assert(len(keys) == 1)
 
         # Some empty articles slipped through my filter. Sad!
-        if(small_emb.shape[0] == 1):
+        if(small_emb.shape[0] <= 1):
             continue
 
         small_emb = small_emb.to(device=device, dtype=DTYPE)
