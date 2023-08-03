@@ -117,10 +117,6 @@ def main(
         keys = set([t[0] for t in shard_tups])
         assert(len(keys) == 1)
 
-        # Some empty articles slipped through my filter. Sad!
-        if(small_emb.shape[0] == 1):
-            continue
-
         small_emb = small_emb.to(device=DEVICE, dtype=DTYPE)
         large_emb = large_emb.to(device=DEVICE, dtype=DTYPE)
 
