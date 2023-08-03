@@ -93,10 +93,6 @@ class PrecomputedShardLoader:
             for i in range(len(loaded_shards)):
                 loaded_shards[i] = sort_shard(loaded_shards[i])
 
-            # Remove empty articles
-            for i in range(len(loaded_shards)):
-                loaded_shards[i] = [(k,v) for k,v in loaded_shards[i] if len(v) > 1]
-
             if(self.filter):
                 # Filter out examples that don't pass the filter
                 for i in range(len(loaded_shards)):
