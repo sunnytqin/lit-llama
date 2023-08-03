@@ -48,7 +48,8 @@ class Tokenizer:
         return tokens
 
     def decode(self, tokens: torch.Tensor) -> str:
-        return self.processor.decode(tokens.tolist(), out_type='immutable_proto')
+        # return self.processor.decode(tokens.tolist(), out_type='immutable_proto')
+        return self.processor.decode(tokens.tolist())
 
     @staticmethod
     def train(input: str, destination: str, vocab_size=32000) -> None:

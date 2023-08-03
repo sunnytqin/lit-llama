@@ -13,7 +13,7 @@ import lightning as L
 import numpy as np
 import torch
 import torch.nn as nn
-import wandb
+# import wandb
 
 from lit_llama import LLaMA, Tokenizer
 from train_head_utils import (
@@ -31,6 +31,7 @@ approximately equal to the proportion of examples with high large model entropy.
 """
 
 
+# DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
 DTYPE = torch.float32
 DEVICE = torch.device("cuda:0")
 
@@ -44,6 +45,7 @@ def main(
     large_checkpoint_path: str = None,
     entropy_min: float = 2.0,
     entropy_max: float = -1,
+    entropy_delta: float = 0.1, 
     zero_entropy_threshold: float = 0.2,
     balanced_classes: bool = True,
     seed: int = 42,
@@ -98,9 +100,13 @@ def main(
 
     filt = {}
     by_label = {}
+    small_entropy_dict = {}
+    large_entropy_dict = {}
     for i, shard_tups in enumerate(logit_loader):
         if(i % 1000 == 0):
             print(i)
+        if (i > 10_000):
+            break
             
         small_tup, large_tup = shard_tups
 
@@ -139,8 +145,8 @@ def main(
             )
 
             large_entropy_in_range = torch.logical_and(
-                large_entropy >= entropy_min, 
-                large_entropy < entropy_max,
+                large_entropy >= small_entropy - entropy_delta, 
+                large_entropy <= small_entropy + entropy_delta,
             )
 
             large_entropy_zero = large_entropy < zero_entropy_threshold
@@ -162,6 +168,9 @@ def main(
             zero_dict[small_key] = high_e_low_a
             ones_dict[small_key] = low_e_high_a
 
+            small_entropy_dict[small_key] = small_entropy
+            large_entropy_dict[small_key] = large_entropy
+            
     # Balance the classes
     if(balanced_classes):
         sizes = {
@@ -199,6 +208,14 @@ def main(
     output_path = os.path.join(output_dir, "filter.pickle")
     with open(output_path, "wb") as fp:
         pickle.dump(filt, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+    output_path = os.path.join(output_dir, "small_entropy.pickle")
+    with open(output_path, "wb") as fp:
+        pickle.dump(small_entropy_dict, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+    output_path = os.path.join(output_dir, "large_entropy.pickle")
+    with open(output_path, "wb") as fp:
+        pickle.dump(large_entropy_dict, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
