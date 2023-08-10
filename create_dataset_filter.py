@@ -197,21 +197,50 @@ def main(
 
         print(new_sizes)
 
-    filt = {
-        k: v.to(device="cpu") for k,v in filt.items()
-    }
+    # split into smaller shards for repetition experiment
+    out_put_shard_size = 200
+    filt_shard = {}
+    filt_sum = 0 
+    small_entropy_shard = {}
+    large_entropy_shard = {}
+    shard_count = 0
+    for k,v in filt.items():
+        if filt_sum >= out_put_shard_size: 
+            print("filter sum: ", filt_sum, len(filt_shard))
 
-    output_path = os.path.join(output_dir, "filter.pickle")
-    with open(output_path, "wb") as fp:
-        pickle.dump(filt, fp, protocol=pickle.HIGHEST_PROTOCOL)
+            output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
+            with open(output_path, "wb") as fp:
+                pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
-    output_path = os.path.join(output_dir, "small_entropy.pickle")
-    with open(output_path, "wb") as fp:
-        pickle.dump(small_entropy_dict, fp, protocol=pickle.HIGHEST_PROTOCOL)
+            output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
+            with open(output_path, "wb") as fp:
+                pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
-    output_path = os.path.join(output_dir, "large_entropy.pickle")
+            output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
+            with open(output_path, "wb") as fp:
+                pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+            shard_count += 1
+            filt_sum = 0
+            filt_shard = {}
+
+        filt_shard[k] = v.to(device="cpu")
+        small_entropy_shard[k] = small_entropy_dict[k]
+        large_entropy_shard[k] = large_entropy_dict[k]
+        filt_sum += v.sum()
+    
+    # save the final batch 
+    shard_count += 1
+    output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
     with open(output_path, "wb") as fp:
-        pickle.dump(large_entropy_dict, fp, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+    output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
+    with open(output_path, "wb") as fp:
+        pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+    output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
+    with open(output_path, "wb") as fp:
+        pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":

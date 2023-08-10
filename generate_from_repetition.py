@@ -42,15 +42,29 @@ def main(
     lm_head = load_lm_head(small_checkpoint_path, DTYPE)
     print("small lm head loaded")
 
-    repetition_file_path = os.path.join(repetition_dir, "repetition.pt")
+    repetition_shards = os.listdir(repetition_dir)
+    repetition_shards = list(sorted(repetition_shards, key=lambda x: int(x.split('_')[-1].strip('.pt'))))
+    print(repetition_shards)
 
-    data = torch.load(repetition_file_path, map_location=DEVICE)
-    new_embed_all = data["new_embed"].to(DTYPE)
-    original_embed_all = torch.stack(data["original_embed"]).to(DTYPE)
-    n_samples = new_embed_all.shape[0]
-    large_entropy = torch.concatenate(data["large_entropy"][0: n_samples]).cpu()
-    print("embedding shape: ", original_embed_all.shape, new_embed_all.shape)
-    prompt_type = (data["prompt_type"][0: n_samples]).bool().cpu()
+    new_embed_all = []
+    original_embed_all = []
+    large_entropy = []
+    prompt_type = []
+    for repetition_shard in repetition_shards:
+        shard_path = os.path.join(repetition_dir, repetition_shard)
+        data = torch.load(shard_path, map_location=DEVICE)
+    
+        new_embed_all.append(data["new_embed"].to(DTYPE))
+        original_embed_all.append(torch.stack(data["original_embed"]).to(DTYPE))
+        n_samples = data["new_embed"].shape[0]
+        large_entropy.append(torch.concatenate(data["large_entropy"][0: n_samples]).cpu())
+        prompt_type.append((data["prompt_type"][0: n_samples]).bool().cpu())
+
+    new_embed_all = torch.concatenate(new_embed_all)
+    original_embed_all = torch.concatenate(original_embed_all)
+    large_entropy = torch.concatenate(large_entropy)
+    prompt_type = torch.concatenate(prompt_type)
+    print("shape checks: ", new_embed_all.shape, original_embed_all.shape, large_entropy.shape, prompt_type.shape)
 
     original_logits = lm_head(original_embed_all).detach()
     new_logits = lm_head(new_embed_all).detach()
@@ -111,7 +125,6 @@ def probs_norm(x_probs, y_probs, prompt_type):
             p_y_given_x[i, j] = y_probs[i, j, ii_idx]
 
     norm = torch.sum(p_x * p_y_given_x, dim=1)
-    print("norm shape: ", norm.shape)
 
     plt.figure()
     plt.hist(norm[prompt_type].cpu().numpy(), bins=50, histtype="step", label="low_e_high_a")
@@ -309,8 +322,11 @@ def plot_entropy(original_entropy, new_entropy, large_entropy, prompt_type):
     plt.legend()
     plt.savefig("results/original_entropy.png")
 
-    print("--- ALL(entropy) classifier ---")
-    simple_classification(torch.from_numpy(new_entropy).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
+    print("--- original entropy classifier ---")
+    simple_classification(torch.from_numpy(original_entropy).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
+
+    # print("--- ALL(entropy) classifier ---")
+    # simple_classification(torch.from_numpy(new_entropy).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
 
 
 def simple_classification(x_train, y_train):
@@ -320,9 +336,11 @@ def simple_classification(x_train, y_train):
         def __init__(self, input_dim=1, output_dim=1):
             super(LinearClassifier, self).__init__()
             self.linear = torch.nn.Linear(input_dim, output_dim)
+            # self.bias = torch.nn.Parameter(torch.rand(1,1))
 
         def forward(self, x):
             x = self.linear(x)
+            # x = x + self.bias
             return x
         
     model = LinearClassifier(input_dim=x_train.shape[1])

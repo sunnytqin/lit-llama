@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #SBATCH -c 1 # Number of cores requested
-#SBATCH -t 0-09:00 # Runtime in minutes
-#SBATCH -p gpu # Partition to submit to
-#SBATCH --mem=180000 # Memory per node in MB (see also --mem-per-cpu)
+#SBATCH -t 0-04:00 # Runtime in minutes
+#SBATCH -p kempner # Partition to submit to
+#SBATCH --mem=80000 # Memory per node in MB (see also --mem-per-cpu)
 #SBATCH -n 1
 #SBATCH --gres=gpu:1
 #SBATCH -o slurm_out/slurm-%j.out # Standard out goes to this file
@@ -14,14 +14,28 @@ module purge
 module load Mambaforge
 source activate hallucination
 
-# create dataset filter for the repetition experiment
-python create_dataset_filter.py /n/holyscratch01/barak_lab/Lab/gahdritz/wikipedia/wiki_logits/7B_test \
-  /n/holyscratch01/barak_lab/Lab/gahdritz/wikipedia/wiki_logits/30B_test \
-  /n/holyscratch01/barak_lab/Lab/sqin/hallucination/repetition/test \
-  --entropy_max 3.0
+# # create dataset filter for the repetition experiment
+# python create_dataset_filter.py /n/holyscratch01/barak_lab/Lab/gahdritz/wikipedia/wiki_logits/7B_test \
+#   /n/holyscratch01/barak_lab/Lab/gahdritz/wikipedia/wiki_logits/30B_test \
+#   /n/holyscratch01/barak_lab/Lab/sqin/hallucination/repetition/test \
+#   --entropy_max 3.0
 
 # reptition experiment
-python repetition.py results/filter /n/holyscratch01/barak_lab/Lab/gahdritz/wikipedia/wiki_test.json 7B 
+echo "python repetition.py /n/holyscratch01/barak_lab/Lab/sqin/hallucination/repetition/test \
+   ${shard_count} \
+   /n/holyscratch01/barak_lab/Lab/gahdritz/wikipedia/wiki_test.json 7B \
+   --sample_until_period=True \
+   --addl_token_limit=100 \
+   --experiment_name=repetition_sample_until_period_no_bos_token "
+
+python repetition.py /n/holyscratch01/barak_lab/Lab/sqin/hallucination/repetition/test \
+   ${shard_count} \
+   /n/holyscratch01/barak_lab/Lab/gahdritz/wikipedia/wiki_test.json 7B \
+   --sample_until_period=True \
+   --addl_token_limit=100 \
+   --experiment_name=repetition_sample_until_period_no_bos_token
 
 # analyze results for the repetition experiment
- python generate_from_repetition.py  /n/holyscratch01/barak_lab/Lab/sqin/hallucination/repetition/test results
+ python generate_from_repetition.py  \
+    /n/holyscratch01/barak_lab/Lab/sqin/hallucination/repetition/test/repetition_sample_until_period_no_eos_token \
+    results
