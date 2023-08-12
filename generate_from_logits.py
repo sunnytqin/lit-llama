@@ -111,7 +111,7 @@ class PrecomputedShardLoader:
             del loaded_shards
 
 
-def load_lm_head(checkpoint_path: str):
+def load_lm_head(checkpoint_path: str, dtype):
     # Load the small model's LM head
     logging.info(f"Loading model at {checkpoint_path}... ")
     t = time.time()
@@ -123,7 +123,7 @@ def load_lm_head(checkpoint_path: str):
         emb_dim, vocab_size, bias=False
     )
     with torch.no_grad():
-        lm_head.weight.data = lm_head_weights.to(DTYPE)
+        lm_head.weight.data = lm_head_weights.to(dtype)
         lm_head.eval()
         lm_head = lm_head.to(DEVICE)
 
@@ -261,10 +261,10 @@ def main(
     assert small_checkpoint_path.is_file()
     assert large_checkpoint_path.is_file()
 
-    small_lm_head = load_lm_head(small_checkpoint_path)
+    small_lm_head = load_lm_head(small_checkpoint_path, DTYPE)
     print("small lm head loaded")
     sys.stdout.flush()
-    large_lm_head = load_lm_head(large_checkpoint_path)
+    large_lm_head = load_lm_head(large_checkpoint_path, DTYPE)
     print("large lm head loaded")
     sys.stdout.flush()
 
