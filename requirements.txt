@@ -9,3 +9,4 @@ datasets  # evaluate.py
 zstandard  # prepare_redpajama.py
 wandb # train_head.py
 scikit-learn # train_head.py
+transformers # precompute_logits.py

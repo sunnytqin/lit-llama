@@ -1,7 +1,6 @@
 import copy
 import json
 import os
-from pathlib import Path
 import pickle
 import sys
 import time
@@ -10,6 +9,10 @@ import warnings
 
 import lightning as L
 import torch
+from transformers import (
+    GPTNeoXForCausalLM,
+    AutoTokenizer,
+)
 
 from lit_llama import LLaMA, Tokenizer
 from lit_llama.model import pipeLLaMA, LLaMAConfig
@@ -18,15 +21,99 @@ from lit_llama.utils import EmptyInitOnDevice, jsd
 
 DTYPE = torch.bfloat16
 DEVICE = torch.device('cuda:0')
+SUPPORTED_MODEL_TYPES = set([
+    "llama",
+    "pythia",
+])
+
+
+def load_llama(model_size, checkpoint_path, tokenizer_path, quantize):
+    assert(os.path.isfile(checkpoint_path))
+    assert(os.path.isfile(tokenizer_path))
+
+    print("Loading model... ", file=sys.stderr, end='')
+    t0 = time.time()
+    with EmptyInitOnDevice(
+        device=DEVICE, dtype=DTYPE, quantization_mode=quantize
+    ):
+        model = pipeLLaMA.from_name(model_size)
+        partition_schedule = model.partition_schedule
+        checkpoint = torch.load(checkpoint_path)
+        for key in list(checkpoint.keys()):
+            if 'transformer.h' in key:
+                split = key.split('.')
+                split[2] = partition_schedule[int(split[2])]
+                checkpoint[".".join(split)] = checkpoint.pop(key)
+        model.load_state_dict(checkpoint, strict=True)
+    
+    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+
+    tokenizer = Tokenizer(tokenizer_path)
+    tokenizer_fn = lambda p: tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
+    
+    return model, tokenizer_fn
+
+
+def load_pythia(model_size, checkpoint_path):
+    assert(os.path.isdir(checkpoint_path))
+
+    print("Loading model... ", file=sys.stderr, end='')
+    t0 = time.time()
+
+    revisions = os.listdir(checkpoint_path)
+    # Revisions are of the format step{number}
+    revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
+    cache_dir = os.path.join(checkpoint_path, revision)
+
+    model = GPTNeoXForCausalLM.from_pretrained(
+        f"EleutherAI/pythia-{model_size}",
+        revision=revision,
+        cache_dir=cache_dir,
+        torch_dtype=DTYPE,
+        local_files_only=True,
+    )
+    model = model.to(device=DEVICE)
+    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+
+    tokenizer= AutoTokenizer.from_pretrained(
+        f"EleutherAI/pythia-{model_size}",
+    )
+    tokenizer_fn = lambda p: (
+        tokenizer(p, return_tensors="pt")["input_ids"]
+        .squeeze(0)
+        .to(device=DEVICE)
+    )
+
+    return model, tokenizer_fn
+
+
+def pythia_forward(model, embeddings=False):
+    def fw(input_ids):
+        return_dict = model.config.use_return_dict
+        outputs = model.gpt_neox(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            return_dict=return_dict,
+        )
+        hidden_states = outputs[0]
+
+        if(embeddings):
+            return hidden_states
+
+        logits = model.embed_out(hidden_states)
+        return logits
+
+    return fw
 
 
 def main(
     *,
     prompts_json_path: str,
     output_dir: str,
+    model_type: str = "llama",
     model_size: str = "30B",
-    checkpoint_path: str = None,
-    tokenizer_path: Optional[Path] = None,
+    checkpoint_path: Optional[str] = None,
+    tokenizer_path: Optional[str] = None,
     quantize: Optional[str] = None,
     output_shard_size: int = 2500,
     return_embeddings: bool = False,
@@ -38,28 +125,35 @@ def main(
     Args:
         prompts_json_path: A JSON file containing a dictionary of prompts keyed by prompt IDs
         output_dir: Where to save output pickle files
-        model_size: The size of the LLAMA model to use. E.g. "7B" or "30B"
+        model_type: Model class. e.g. "llama" or "pythia"
+        model_size: The size of the model to use. E.g. "7B" or "30B"
         checkpoint_path: The checkpoint path to load.
         tokenizer_path: The tokenizer path to load.
         quantize: Whether to quantize the model and using which method:
             ``"llm.int8"``: LLM.int8() mode,
-            ``"gptq.int4"``: GPTQ 4-bit mode.
+            ``"gptq.int4"``: GPTQ 4-bit model.
         output_shard_size: Number of outputs per output shard
         return_embeddings: Whether to skip the logit head and return raw embeddings
         return_initial_embeddings: Whether to immediately return the sequence embedding
         resume: Quick and dirty resume functionality. DON'T CHANGE HYPERPARAMS.
     """
+    assert(model_type in SUPPORTED_MODEL_TYPES)
+
     if not checkpoint_path:
-        checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/lit-llama.pth')
+        if(model_type == "llama"):
+            checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/lit-llama.pth'
+        elif(model_type == "pythia"):
+            checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/models/pythia/pythia-{model_size}/'
+        else:
+            raise ValueError
     else:
-        checkpoint_path = Path(checkpoint_path)
+        checkpoint_path = checkpoint_path
+    
     if not tokenizer_path:
-        tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model')
+        if(model_type == "llama"):
+            tokenizer_path = '/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model'
     else:
-        tokenizer_path = Path(tokenizer_path)
-   
-    assert checkpoint_path.is_file()
-    assert tokenizer_path.is_file()
+        tokenizer_path = tokenizer_path
 
     assert not (return_embeddings and return_initial_embeddings), \
             "Only one of return_embeddings and return_initial_embeddings may be enabled"
@@ -67,28 +161,17 @@ def main(
     # Create the output dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # Initialize the tokenizer
-    tokenizer = Tokenizer(tokenizer_path)
-
-    # Initialize the model
-    print("Loading model... ", file=sys.stderr, end='')
-    with EmptyInitOnDevice(
-        device=DEVICE, dtype=DTYPE, quantization_mode=quantize
-    ):
-        t0 = time.time()
-#        model = LLaMA.from_name(model_size)
-#        checkpoint = torch.load(checkpoint_path)
-#        model.load_state_dict(checkpoint, strict=True)
-        model = pipeLLaMA.from_name(model_size)
-        partition_schedule = model.partition_schedule
-        checkpoint = torch.load(checkpoint_path)
-        for key in list(checkpoint.keys()):
-            if 'transformer.h' in key:
-                split = key.split('.')
-                split[2] = partition_schedule[int(split[2])]
-                checkpoint[".".join(split)] = checkpoint.pop(key)
-        model.load_state_dict(checkpoint, strict=True)
-    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+    # Initialize the model and tokenizer
+    if(model_type == "llama"):
+        model, tokenizer = load_llama(
+            model_size, checkpoint_path, tokenizer_path, quantize
+        )
+    elif(model_type == "pythia"):
+        model, tokenizer = load_pythia(
+            model_size, checkpoint_path
+        )
+    else:
+        raise ValueError(f"Invalid model type: {model_type}")
 
     model.eval()
 
@@ -100,6 +183,7 @@ def main(
 
     def get_shard_path(shard_count):
         output_basename = os.path.split(prompts_json_path)[-1].split('.')[0]
+        output_basename += f"_{model_type}"
         output_basename += f"_{model_size}"
         if(return_embeddings):
             output_basename += "_emb"
@@ -132,21 +216,32 @@ def main(
             continue
 
         # Tokenize the prompt
-        encoded_prompt = tokenizer.encode(prompt, bos=True, eos=False, device=DEVICE)
+        encoded_prompt = tokenizer(prompt)
         len_prompt = len(encoded_prompt)
         encoded_prompt = encoded_prompt.unsqueeze(0)  # add batch dimension
 
-        if(len_prompt > model.config.block_size):
+        if(len_prompt == 0):
+            print(f'Skipping "{key}" (too short)...')
+            continue
+
+        if((model_type == "llama" and len_prompt > model.config.block_size)):
             print(f'Skipping "{key}" (too long)...')
             continue
 
         # Run the model
         with torch.no_grad():
-            fn = model.forward
-            if(return_embeddings):
-                fn = model._forward
-            elif(return_initial_embeddings):
-                fn = model.embed_sequence
+            if(model_type == "llama"):
+                fn = model.forward
+                if(return_embeddings):
+                    fn = model._forward
+                elif(return_initial_embeddings):
+                    fn = model.embed_sequence
+            elif(model_type == "pythia"):
+                fn = pythia_forward(model)
+                if(return_embeddings):
+                    fn = pythia_forward(model, embeddings=True)
+                elif(return_initial_embeddings):
+                    raise NotImplementedError
 
             logits = fn(encoded_prompt)
 
