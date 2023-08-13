@@ -7,12 +7,20 @@ from typing import Optional, Iterator, Tuple
 
 import torch
 import torch.nn as nn
+from transformers import (
+    GPTNeoXForCausalLM,
+)
 
 from lit_llama.utils import EmptyInitOnDevice, jsd
 
 
 DTYPE = torch.float32
 DEVICE = torch.device("cuda:0")
+
+VOCAB_SIZES = {
+    "llama": None,
+    "pythia": 50254,
+}
 
 
 class PrecomputedShardLoader:
@@ -57,6 +65,7 @@ class PrecomputedShardLoader:
     def load_shards(self, shard_id: int):
         shards = []
         for shard_dir, shard_name in zip(self.shard_dirs, self.shards[shard_id]):
+            print(f"{shard_dir} {shard_name}")
             shard_path = os.path.join(shard_dir, shard_name)
             with open(shard_path, "rb") as fp:
                 shard = pickle.load(fp)
@@ -108,25 +117,53 @@ class PrecomputedShardLoader:
             del loaded_shards
 
 
-def load_lm_head(checkpoint_path: str, dtype: torch.dtype, device: str):
-    # Load the small model's LM head
+def load_lm_head(
+    checkpoint_path: str, 
+    dtype: torch.dtype, 
+    device: str, 
+    model_type: str,
+    model_size: str,
+):
     logging.info(f"Loading model at {checkpoint_path}... ")
     t = time.time()
-    checkpoint = torch.load(checkpoint_path)
-    assert(len([k for k in checkpoint.keys() if "lm_head" in k]) == 1)
-    lm_head_weights = checkpoint["lm_head.weight"]
-    vocab_size, emb_dim = lm_head_weights.shape
-    lm_head = nn.Linear(
-        emb_dim, vocab_size, bias=False
-    )
-    with torch.no_grad():
-        lm_head.weight.data = lm_head_weights.to(dtype)
-        lm_head.eval()
+    if(model_type == "llama"): 
+        assert(os.path.isfile(checkpoint_path))
+        checkpoint = torch.load(checkpoint_path)
+        assert(len([k for k in checkpoint.keys() if "lm_head" in k]) == 1)
+        lm_head_weights = checkpoint["lm_head.weight"]
+        vocab_size, emb_dim = lm_head_weights.shape
+        lm_head = nn.Linear(
+            emb_dim, vocab_size, bias=False
+        )
+        with torch.no_grad():
+            lm_head.weight.data = lm_head_weights.to(dtype)
+            lm_head.eval()
+            lm_head = lm_head.to(device)
+
+        del checkpoint
+    elif(model_type == "pythia"):
+        assert(os.path.isdir(checkpoint_path))
+        revisions = os.listdir(checkpoint_path)
+        # Revisions are of the format step{number}
+        revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
+        cache_dir = os.path.join(checkpoint_path, revision)
+
+        model = GPTNeoXForCausalLM.from_pretrained(
+            f"EleutherAI/pythia-{model_size}",
+            revision=revision,
+            cache_dir=cache_dir,
+            torch_dtype=dtype,
+            local_files_only=True,
+        )
+        lm_head = model.embed_out
+        lm_head = lm_head.eval()
         lm_head = lm_head.to(device)
 
-    logging.info(f"Time: {time.time() - t:.02f} seconds.")
+        del model
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
 
-    del checkpoint
+    logging.info(f"Time: {time.time() - t:.02f} seconds.")
 
     return lm_head
 
@@ -266,6 +303,7 @@ def _preprocessor(
     shard_loader: PrecomputedShardLoader,
     small_lm_head: nn.Linear,
     large_lm_head: nn.Linear,
+    model_type: str,
     no_bins: int,
     min_bin: float,
     max_bin: float,
@@ -307,6 +345,12 @@ def _preprocessor(
             # Compute logits from the small model embeddings
             small_logits = small_lm_head(small_emb)
             large_logits = large_lm_head(large_emb)
+
+            # Pythia models inexplicably use different amounts of padding at different sizes
+            vocab_size = VOCAB_SIZES[model_type]
+            if(vocab_size):
+                small_logits = small_logits[..., :vocab_size]
+                large_logits = large_logits[..., :vocab_size]
 
             # Softmax both sets of logits
             small_logits_softmax = torch.nn.functional.softmax(small_logits, dim=-1)

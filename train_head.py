@@ -28,6 +28,16 @@ from train_head_utils import (
 
 DTYPE = torch.float32
 DEVICE = torch.device("cuda:0")
+SUPPORTED_MODEL_TYPES = set([
+    "llama",
+    "pythia",
+])
+
+DEFAULT_MODEL_DIRS = {
+    "llama": "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama",
+    "pythia": "/n/holystore01/LABS/barak_lab/Everyone/models/pythia/",
+}
+assert(all([d in SUPPORTED_MODEL_TYPES for d in DEFAULT_MODEL_DIRS]))
 
 # WandB x axis
 WANDB_STEP_METRICS = set(["step", "epoch"])
@@ -105,6 +115,9 @@ def main(
     precomputed_head_input_emb_dir: str = None,
     small_checkpoint_path: str = None,
     large_checkpoint_path: str = None,
+    small_model_size: str = "7B",
+    large_model_size: str = "30B",
+    model_type: str = "llama",
     hidden_dim: int = 2048,
     no_hidden_layers: int = 5,
     dropout: float = 0.1,
@@ -195,21 +208,26 @@ def main(
         _wandb_setup(args)
 
     if not small_checkpoint_path:
-        small_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/7B/lit-llama.pth')
-    else:
-        small_checkpoint_path = Path(small_checkpoint_path)
-    if not large_checkpoint_path:
-        large_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/30B/lit-llama.pth')
-    else:
-        large_checkpoint_path = Path(large_checkpoint_path)
+        default_model_dir = DEFAULT_MODEL_DIRS[model_type]
+        if(model_type == "llama"):
+            small_checkpoint_path = f"{default_model_dir}/7B/lit-llama.pth"
+        elif(model_type == "pythia"):
+            small_checkpoint_path = f"{default_model_dir}/pythia-1.4b/"
+        else:
+            raise ValueError
 
-    assert small_checkpoint_path.is_file()
-    assert large_checkpoint_path.is_file()
+    if not large_checkpoint_path:
+        if(model_type == "llama"):
+            large_checkpoint_path = f"{default_model_dir}/30B/lit-llama.pth"
+        elif(model_type == "pythia"):
+            large_checkpoint_path = f"{default_model_dir}/pythia-12b/"
+        else:
+            raise ValueError
 
     # Load the (small) LM heads of both the small and the large model.
     # We've only cached the embeddings and not the (much larger) logits.
-    small_lm_head = load_lm_head(small_checkpoint_path, dtype=DTYPE, device=DEVICE)
-    large_lm_head = load_lm_head(large_checkpoint_path, dtype=DTYPE, device=DEVICE)
+    small_lm_head = load_lm_head(small_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=small_model_size)
+    large_lm_head = load_lm_head(large_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=large_model_size)
 
     # Load the precomputed logits
     shard_dirs = [
@@ -311,6 +329,7 @@ def main(
             shard_loader=logit_loader,
             small_lm_head=small_lm_head,
             large_lm_head=large_lm_head,
+            model_type=model_type,
             no_bins=no_bins,
             min_bin=min_bin,
             max_bin=max_bin,
@@ -340,6 +359,7 @@ def main(
                     shard_loader=val_logit_loader,
                     small_lm_head=small_lm_head,
                     large_lm_head=large_lm_head,
+                    model_type=model_type,
                     no_bins=no_bins,
                     min_bin=min_bin,
                     max_bin=max_bin,

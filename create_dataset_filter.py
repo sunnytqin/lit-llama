@@ -41,6 +41,9 @@ def main(
     precomputed_small_emb_dir: str,
     precomputed_large_emb_dir: str,
     output_dir: str,
+    model_type: str = "llama",
+    small_model_size: str = "7B",
+    large_model_size: str = "30B",
     small_checkpoint_path: str = None,
     large_checkpoint_path: str = None,
     entropy_min: float = 2.0,
@@ -48,6 +51,7 @@ def main(
     entropy_delta: float = 0.1, 
     zero_entropy_threshold: float = 0.2,
     balanced_classes: bool = True,
+    shard_output: bool = False,
     seed: int = 42,
 ) -> None:
     """
@@ -74,21 +78,30 @@ def main(
     os.makedirs(output_dir, exist_ok=True)
 
     if not small_checkpoint_path:
-        small_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/7B/lit-llama.pth')
-    else:
-        small_checkpoint_path = Path(small_checkpoint_path)
-    if not large_checkpoint_path:
-        large_checkpoint_path = Path(f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/30B/lit-llama.pth')
-    else:
-        large_checkpoint_path = Path(large_checkpoint_path)
+        default_model_dir = DEFAULT_MODEL_DIRS[model_type]
+        if(model_type == "llama"):
+            small_checkpoint_path = f"{default_model_dir}/7B/lit-llama.pth"
+        elif(model_type == "pythia"):
+            small_checkpoint_path = f"{default_model_dir}/pythia-1.4b/"
+        else:
+            raise ValueError
 
-    assert small_checkpoint_path.is_file()
-    assert large_checkpoint_path.is_file()
+    if not large_checkpoint_path:
+        if(model_type == "llama"):
+            large_checkpoint_path = f"{default_model_dir}/30B/lit-llama.pth"
+        elif(model_type == "pythia"):
+            large_checkpoint_path = f"{default_model_dir}/pythia-12b/"
+        else:
+            raise ValueError
 
     # Load the (small) LM heads of both the small and the large model.
     # We've only cached the embeddings and not the (much larger) logits.
-    small_lm_head = load_lm_head(small_checkpoint_path, dtype=DTYPE, device=DEVICE)
-    large_lm_head = load_lm_head(large_checkpoint_path, dtype=DTYPE, device=DEVICE)
+    small_lm_head = load_lm_head(
+        small_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=small_model_size
+    )
+    large_lm_head = load_lm_head(
+        large_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=large_model_size
+    )
 
     # Load the precomputed logits
     shard_dirs = [
@@ -105,8 +118,6 @@ def main(
     for i, shard_tups in enumerate(logit_loader):
         if(i % 1000 == 0):
             print(i)
-        if (i > 10_000):
-            break
             
         small_tup, large_tup = shard_tups
 
@@ -197,50 +208,59 @@ def main(
 
         print(new_sizes)
 
-    # split into smaller shards for repetition experiment
-    out_put_shard_size = 200
-    filt_shard = {}
-    filt_sum = 0 
-    small_entropy_shard = {}
-    large_entropy_shard = {}
-    shard_count = 0
-    for k,v in filt.items():
-        if filt_sum >= out_put_shard_size: 
-            print("filter sum: ", filt_sum, len(filt_shard))
-
-            output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
-            with open(output_path, "wb") as fp:
-                pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
-
-            output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
-            with open(output_path, "wb") as fp:
-                pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
-
-            output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
-            with open(output_path, "wb") as fp:
-                pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
-            shard_count += 1
-            filt_sum = 0
-            filt_shard = {}
-
-        filt_shard[k] = v.to(device="cpu")
-        small_entropy_shard[k] = small_entropy_dict[k]
-        large_entropy_shard[k] = large_entropy_dict[k]
-        filt_sum += v.sum()
+    if(shard_output):
+        # split into smaller shards for repetition experiment
+        out_put_shard_size = 200
+        filt_shard = {}
+        filt_sum = 0 
+        small_entropy_shard = {}
+        large_entropy_shard = {}
+        shard_count = 0
+        for k,v in filt.items():
+            if filt_sum >= out_put_shard_size: 
+                print("filter sum: ", filt_sum, len(filt_shard))
     
-    # save the final batch 
-    shard_count += 1
-    output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
-    with open(output_path, "wb") as fp:
-        pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+                output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
+                with open(output_path, "wb") as fp:
+                    pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    
+                output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
+                with open(output_path, "wb") as fp:
+                    pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    
+                output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
+                with open(output_path, "wb") as fp:
+                    pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+                shard_count += 1
+                filt_sum = 0
+                filt_shard = {}
+    
+            filt_shard[k] = v.to(device="cpu")
+            small_entropy_shard[k] = small_entropy_dict[k]
+            large_entropy_shard[k] = large_entropy_dict[k]
+            filt_sum += v.sum()
+        
+        # save the final batch 
+        shard_count += 1
+        output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
+        with open(output_path, "wb") as fp:
+            pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    
+        output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
+        with open(output_path, "wb") as fp:
+            pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    
+        output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
+        with open(output_path, "wb") as fp:
+            pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+    else:
+        filt = {
+            k: v.to(device="cpu") for k,v in filt.items()
+        }
 
-    output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
-    with open(output_path, "wb") as fp:
-        pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
-
-    output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
-    with open(output_path, "wb") as fp:
-        pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+        output_path = os.path.join(output_dir, "filter.pickle")
+        with open(output_path, "wb") as fp:
+            pickle.dump(filt, fp, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
