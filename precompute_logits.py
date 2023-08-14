@@ -78,6 +78,7 @@ def load_pythia(model_size, checkpoint_path):
     tokenizer= AutoTokenizer.from_pretrained(
         f"EleutherAI/pythia-{model_size}",
     )
+
     tokenizer_fn = lambda p: (
         tokenizer(p, return_tensors="pt")["input_ids"]
         .squeeze(0)
@@ -241,7 +242,7 @@ def main(
                 if(return_embeddings):
                     fn = pythia_forward(model, embeddings=True)
                 elif(return_initial_embeddings):
-                    raise NotImplementedError
+                    fn = model.gpt_neox.embed_in
 
             logits = fn(encoded_prompt)
 
