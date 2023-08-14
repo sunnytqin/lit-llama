@@ -385,6 +385,11 @@ def _preprocessor(
                 target = torch.log(divergence)
 
                 _stash_contents.setdefault("divergence", []).extend(_unpack(divergence))
+            elif(target_fn_name == "jsd"):
+                divergence = jsd(small_logits, large_logits)
+                target = divergence
+
+                _stash_contents.setdefault("divergence", []).extend(_unpack(divergence))
             elif(target_fn_name == "small_entropy"):
                 target = small_entropy
             elif(target_fn_name == "large_entropy"):
