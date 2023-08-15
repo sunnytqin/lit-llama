@@ -117,6 +117,23 @@ class PrecomputedShardLoader:
             del loaded_shards
 
 
+def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype = DTYPE):
+    revisions = os.listdir(checkpoint_path)
+    # Revisions are of the format step{number}
+    revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
+    cache_dir = os.path.join(checkpoint_path, revision)
+
+    model = GPTNeoXForCausalLM.from_pretrained(
+        f"EleutherAI/pythia-{model_size}",
+        revision=revision,
+        cache_dir=cache_dir,
+        torch_dtype=dtype,
+        local_files_only=True,
+    )
+
+    return model
+
+
 def load_lm_head(
     checkpoint_path: str, 
     dtype: torch.dtype, 
@@ -143,18 +160,7 @@ def load_lm_head(
         del checkpoint
     elif(model_type == "pythia"):
         assert(os.path.isdir(checkpoint_path))
-        revisions = os.listdir(checkpoint_path)
-        # Revisions are of the format step{number}
-        revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
-        cache_dir = os.path.join(checkpoint_path, revision)
-
-        model = GPTNeoXForCausalLM.from_pretrained(
-            f"EleutherAI/pythia-{model_size}",
-            revision=revision,
-            cache_dir=cache_dir,
-            torch_dtype=dtype,
-            local_files_only=True,
-        )
+        model = load_pythia_model(checkpoint_path, model_size, dtype)
         lm_head = model.embed_out
         lm_head = lm_head.eval()
         lm_head = lm_head.to(device)
@@ -465,4 +471,5 @@ def batch_loader(
                 batch = []
 
     # Serve the final batch, even if it's not full
-    yield _package_batch(batch)
+    if(len(batch) > 0):
+        yield _package_batch(batch)
