@@ -34,6 +34,10 @@ approximately equal to the proportion of examples with high large model entropy.
 # DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
 DTYPE = torch.float32
 DEVICE = torch.device("cuda:0")
+DEFAULT_MODEL_DIRS = {
+    "llama": "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama",
+    "pythia": "/n/holystore01/LABS/barak_lab/Everyone/models/pythia/",
+}
 
 
 def main(
@@ -80,7 +84,7 @@ def main(
     if not small_checkpoint_path:
         default_model_dir = DEFAULT_MODEL_DIRS[model_type]
         if(model_type == "llama"):
-            small_checkpoint_path = f"{default_model_dir}/7B/lit-llama.pth"
+            small_checkpoint_path = f"{default_model_dir}/{small_model_size}/lit-llama.pth"
         elif(model_type == "pythia"):
             small_checkpoint_path = f"{default_model_dir}/pythia-1.4b/"
         else:
@@ -88,7 +92,7 @@ def main(
 
     if not large_checkpoint_path:
         if(model_type == "llama"):
-            large_checkpoint_path = f"{default_model_dir}/30B/lit-llama.pth"
+            large_checkpoint_path = f"{default_model_dir}/{large_model_size}/lit-llama.pth"
         elif(model_type == "pythia"):
             large_checkpoint_path = f"{default_model_dir}/pythia-12b/"
         else:
@@ -180,6 +184,10 @@ def main(
             
     # Balance the classes
     if(balanced_classes):
+#        import pickle
+#        with open("by_label.pickle", "wb") as fp:
+#            pickle.dump(by_label, fp, protocol=pickle.HIGHEST_PROTOCOL)
+        
         sizes = {
             "0": sum([torch.sum(v) for v in by_label["0"].values()]),
             "1": sum([torch.sum(v) for v in by_label["1"].values()]),
