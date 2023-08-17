@@ -19,6 +19,8 @@ from lit_llama import LLaMA, Tokenizer
 from train_head_utils import (
     batch_loader,
     load_lm_head,
+    load_llama_tokenizer,
+    load_pythia_tokenizer,
     PrecomputedShardLoader,
     _preprocessor,
 )
@@ -45,11 +47,13 @@ def main(
     precomputed_small_emb_dir: str,
     precomputed_large_emb_dir: str,
     output_dir: str,
+    dataset_json_path: str,
     model_type: str = "llama",
     small_model_size: str = "7B",
     large_model_size: str = "30B",
     small_checkpoint_path: str = None,
     large_checkpoint_path: str = None,
+    tokenizer_path: str = None,
     entropy_min: float = 2.0,
     entropy_max: float = -1,
     entropy_delta: float = 0.1, 
@@ -97,6 +101,12 @@ def main(
             large_checkpoint_path = f"{default_model_dir}/pythia-12b/"
         else:
             raise ValueError
+
+    if not tokenizer_path:
+        if(model_type == "llama"):
+            tokenizer_path = '/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model'
+        elif(model_type == "pythia"):
+            pass # Not necessary
 
     # Load the (small) LM heads of both the small and the large model.
     # We've only cached the embeddings and not the (much larger) logits.
@@ -184,16 +194,136 @@ def main(
             
     # Balance the classes
     if(balanced_classes):
-#        import pickle
-#        with open("by_label.pickle", "wb") as fp:
-#            pickle.dump(by_label, fp, protocol=pickle.HIGHEST_PROTOCOL)
-        
+        # First, we need to balance individual token counts between classes
+
+        # Load the tokenizer
+        if(model_type == "llama"):
+            tokenizer = load_llama_tokenizer(tokenizer_path, device=DEVICE)
+        elif(model_type == "pythia"):
+            tokenizer = load_pythia_tokenizer(small_model_size, device=DEVICE)
+        else:
+            raise ValueError(f"Model type: {model_type}")
+
+        # Load the dataset
+        with open(dataset_json_path, "r") as f:
+            dataset = json.load(f)
+
+        # Tokenize the dataset
+        print("Tokenizing dataset...")
+        tic = time.time()
+        dataset_tokens = {}
+        for key, text in dataset.items():
+            dataset_tokens[key] = tokenizer(text)
+
+        toc = time.time() - tic
+        print(f"Tokenized dataset in {toc} seconds")
+
+        print("Balancing token counts...")
+        tic = time.time()
+
+        # Count tokens in each class using the class filters
+        max_token_id = 0
+        token_counts = {label: {} for label in by_label}
+        for k in by_label["0"]:
+            filters = {
+                label: by_label[label][k] for label in by_label
+            }
+            
+            tokens = dataset_tokens[k]
+
+            # Quick sanity check
+            assert(all(
+                len(tokens) == len(filters[label]) for label in filters
+            ))
+
+            for i, token in enumerate(tokens.tolist()):
+                if(token > max_token_id):
+                    max_token_id = token
+
+                token_str = str(token)
+                for label in filters:
+                    token_counts[label].setdefault(token_str, 0)
+                    if(filters[label][i]):
+                        token_counts[label][token_str] = token_counts[label][token_str] + 1
+
+        # Compute resampling probabilities for each token in each class
+        token_sample_ratios = {
+            label: torch.ones(max_token_id + 1, dtype=DTYPE, device=DEVICE) for label in token_counts
+        }
+        for k in token_counts["0"]:
+            counts = {
+                label: token_counts[label][k] for label in token_counts
+            }
+
+            min_count_key = min(counts, key=counts.get)
+            for label in token_counts:
+                if(counts[label] != 0):
+                    token_sample_ratios[label][int(k)] = counts[min_count_key] / counts[label]
+
+        # Resample tokens
+        for k, token_tensor in dataset_tokens.items():
+            for label in by_label:
+                # Retrieve token-specific sampling probabilities
+                token_sample_ratio_tensor = token_sample_ratios[label]
+                ratios_for_sequence = token_sample_ratio_tensor[token_tensor]
+
+                # Sample a mask accordingly (0 = discard, 1 = keep)
+                multinomial = torch.zeros([len(token_tensor), 2], dtype=DTYPE, device=DEVICE)
+                multinomial[:, 0] = 1. - ratios_for_sequence
+                multinomial[:, 1] = ratios_for_sequence
+
+                sample_mask = torch.multinomial(multinomial, 1)[:, 0].bool()
+                
+                # Apply it
+                by_label[label][k] = torch.logical_and(
+                    by_label[label][k],
+                    sample_mask,
+                )
+
+        toc = time.time() - tic
+        print(f"Balanced token counts in {toc} seconds")
+
+        # # Validate token counts
+        # max_token_id = 0
+        # token_counts = {label: {} for label in by_label}
+        # for k in by_label["0"]:
+        #     filters = {
+        #         label: by_label[label][k] for label in by_label
+        #     }
+            
+        #     tokens = dataset_tokens[k]
+
+        #     # Quick sanity check
+        #     assert(all(
+        #         len(tokens) == len(filters[label]) for label in filters
+        #     ))
+
+        #     for i, token in enumerate(tokens):
+        #         token = token.item()
+
+        #         if(token > max_token_id):
+        #             max_token_id = token
+
+        #         token_str = str(token)
+        #         for label in filters:
+        #             token_counts[label].setdefault(token_str, 0)
+        #             if(filters[label][i]):
+        #                 token_counts[label][token_str] = token_counts[label][token_str] + 1
+        #
+        # print(list(sorted(token_counts["0"].items(), key=lambda x: x[1], reverse=True))[:100])
+        # print(list(sorted(token_counts["1"].items(), key=lambda x: x[1], reverse=True))[:100])
+
         sizes = {
-            "0": sum([torch.sum(v) for v in by_label["0"].values()]),
-            "1": sum([torch.sum(v) for v in by_label["1"].values()]),
+            label: sum([torch.sum(v) for v in by_label[label].values()]) 
+            for label in by_label
         }
 
-        # The class with the most examples
+        print(f"Initial sizes: {sizes}")
+
+        # Semi-vestigial code for balancing the number of tokens in each class
+        # (in a token-agnostic way). The new token balancing code pretty much 
+        # does this as a side effect, but I guess it's nice to clean up around
+        # the edges a bit.
         max_class = max(sizes, key=sizes.get)
         min_class = min(sizes, key=sizes.get)
 
@@ -210,11 +340,11 @@ def main(
             by_label[max_class][key] = filtered
 
         new_sizes = {
-            "0": sum([torch.sum(v) for v in by_label["0"].values()]),
-            "1": sum([torch.sum(v) for v in by_label["1"].values()]),
+            label: sum([torch.sum(v) for v in by_label[label].values()]) 
+            for label in by_label
         }
 
-        print(new_sizes)
+        print(f"New sizes: {new_sizes}")
 
     if(shard_output):
         # split into smaller shards for repetition experiment
