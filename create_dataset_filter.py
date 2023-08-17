@@ -263,16 +263,17 @@ def main(
         # Resample tokens
         for k, token_tensor in dataset_tokens.items():
             for label in by_label:
+                if(k not in by_label[label]):
+                    continue
+
                 # Retrieve token-specific sampling probabilities
                 token_sample_ratio_tensor = token_sample_ratios[label]
                 ratios_for_sequence = token_sample_ratio_tensor[token_tensor]
 
                 # Sample a mask accordingly (0 = discard, 1 = keep)
-                multinomial = torch.zeros([len(token_tensor), 2], dtype=DTYPE, device=DEVICE)
-                multinomial[:, 0] = 1. - ratios_for_sequence
-                multinomial[:, 1] = ratios_for_sequence
-
-                sample_mask = torch.multinomial(multinomial, 1)[:, 0].bool()
+                sample_mask = torch.rand(
+                    ratios_for_sequence.shape, device=DEVICE,
+                ) <= ratios_for_sequence
                 
                 # Apply it
                 by_label[label][k] = torch.logical_and(
@@ -309,7 +310,7 @@ def main(
         #             token_counts[label].setdefault(token_str, 0)
         #             if(filters[label][i]):
         #                 token_counts[label][token_str] = token_counts[label][token_str] + 1
-        #
+        
         # print(list(sorted(token_counts["0"].items(), key=lambda x: x[1], reverse=True))[:100])
         # print(list(sorted(token_counts["1"].items(), key=lambda x: x[1], reverse=True))[:100])
 
