@@ -8,9 +8,11 @@ from typing import Optional, Iterator, Tuple
 import torch
 import torch.nn as nn
 from transformers import (
+    AutoTokenizer,
     GPTNeoXForCausalLM,
 )
 
+from lit_llama import LLaMA, Tokenizer
 from lit_llama.utils import EmptyInitOnDevice, jsd
 
 
@@ -65,7 +67,6 @@ class PrecomputedShardLoader:
     def load_shards(self, shard_id: int):
         shards = []
         for shard_dir, shard_name in zip(self.shard_dirs, self.shards[shard_id]):
-            print(f"{shard_dir} {shard_name}")
             shard_path = os.path.join(shard_dir, shard_name)
             with open(shard_path, "rb") as fp:
                 shard = pickle.load(fp)
@@ -117,7 +118,39 @@ class PrecomputedShardLoader:
             del loaded_shards
 
 
-def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype = DTYPE):
+def load_llama_tokenizer(tokenizer_path, device):
+    tokenizer = Tokenizer(tokenizer_path)
+    tokenizer_fn = lambda p: tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
+    return tokenizer_fn
+
+
+def load_llama(model_size, checkpoint_path, tokenizer_path, dtype, quantize):
+    assert(os.path.isfile(checkpoint_path))
+    assert(os.path.isfile(tokenizer_path))
+
+    print("Loading model... ", file=sys.stderr, end='')
+    t0 = time.time()
+    with EmptyInitOnDevice(
+        device=DEVICE, dtype=dtype, quantization_mode=quantize
+    ):
+        model = pipeLLaMA.from_name(model_size)
+        partition_schedule = model.partition_schedule
+        checkpoint = torch.load(checkpoint_path)
+        for key in list(checkpoint.keys()):
+            if 'transformer.h' in key:
+                split = key.split('.')
+                split[2] = partition_schedule[int(split[2])]
+                checkpoint[".".join(split)] = checkpoint.pop(key)
+        model.load_state_dict(checkpoint, strict=True)
+    
+    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+
+    tokenizer = load_llama_tokenizer(tokenizer_path, DEVICE)
+    
+    return model, tokenizer
+
+
+def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype):
     revisions = os.listdir(checkpoint_path)
     # Revisions are of the format step{number}
     revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
@@ -132,6 +165,35 @@ def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype 
     )
 
     return model
+
+
+def load_pythia_tokenizer(model_size, device):
+    tokenizer= AutoTokenizer.from_pretrained(
+        f"EleutherAI/pythia-{model_size}",
+    )
+
+    tokenizer_fn = lambda p: (
+        tokenizer(p, return_tensors="pt")["input_ids"]
+        .squeeze(0)
+        .to(device=DEVICE)
+    )
+
+    return tokenizer_fn
+
+
+def load_pythia(model_size, checkpoint_path, dtype):
+    assert(os.path.isdir(checkpoint_path))
+
+    print("Loading model... ", file=sys.stderr, end='')
+    t0 = time.time()
+
+    model = load_pythia_model(checkpoint_path, model_size, dtype)
+    model = model.to(device=DEVICE)
+    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+
+    tokenizer = load_pythia_tokenizer(model_size, DEVICE)
+
+    return model, tokenizer
 
 
 def load_lm_head(
@@ -317,6 +379,7 @@ def _preprocessor(
     max_entropy: float,
     provide_entropy_as_input: bool,
     device: torch.device,
+    dtype: torch.dtype,
     target_fn_name="log_jsd",
     bin_target: bool = True,
     _stash=None,
@@ -343,9 +406,9 @@ def _preprocessor(
         if(small_emb.shape[0] <= 1):
             continue
 
-        small_emb = small_emb.to(device=device, dtype=DTYPE)
-        large_emb = large_emb.to(device=device, dtype=DTYPE)
-        input_emb = input_emb.to(device=device, dtype=DTYPE)
+        small_emb = small_emb.to(device=device, dtype=dtype)
+        large_emb = large_emb.to(device=device, dtype=dtype)
+        input_emb = input_emb.to(device=device, dtype=dtype)
 
         with torch.no_grad():
             # Compute logits from the small model embeddings

@@ -339,6 +339,7 @@ def main(
             target_fn_name=target_fn_name,
             bin_target=bin_target,
             device=DEVICE,
+            dtype=DTYPE,
         )
 
         bl = batch_loader(
@@ -369,6 +370,7 @@ def main(
                     target_fn_name=target_fn_name,
                     bin_target=bin_target,
                     device=DEVICE,
+                    dtype=DTYPE,
                 )
 
                 val_bl = batch_loader(
@@ -383,6 +385,9 @@ def main(
                     val_batch_count = 0
                     all_val_preds = []
                     all_val_gt = []
+
+                    distance_prediction_head.eval()
+
                     for j, (val_inputs, val_targets) in enumerate(val_bl):
                         val_inputs = val_inputs.to(DEVICE)
                         val_targets = val_targets.to(DEVICE)
@@ -443,6 +448,8 @@ def main(
 
                     if(use_wandb):
                         _wandb_log(metrics=val_metrics, step_metric="step", step=cum_step)
+
+                    distance_prediction_head.train()
 
             inputs = inputs.to(device=DEVICE, dtype=DTYPE)
             # Hold off on cast until the loss fn

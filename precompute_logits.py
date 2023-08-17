@@ -17,6 +17,10 @@ from transformers import (
 from lit_llama import LLaMA, Tokenizer
 from lit_llama.model import pipeLLaMA, LLaMAConfig
 from lit_llama.utils import EmptyInitOnDevice, jsd
+from train_head_utils import (
+    load_llama,
+    load_pythia,
+)
 
 
 DTYPE = torch.bfloat16
@@ -25,67 +29,7 @@ SUPPORTED_MODEL_TYPES = set([
     "llama",
     "pythia",
 ])
-
-
-def load_llama(model_size, checkpoint_path, tokenizer_path, quantize):
-    assert(os.path.isfile(checkpoint_path))
-    assert(os.path.isfile(tokenizer_path))
-
-    print("Loading model... ", file=sys.stderr, end='')
-    t0 = time.time()
-    with EmptyInitOnDevice(
-        device=DEVICE, dtype=DTYPE, quantization_mode=quantize
-    ):
-        model = pipeLLaMA.from_name(model_size)
-        partition_schedule = model.partition_schedule
-        checkpoint = torch.load(checkpoint_path)
-        for key in list(checkpoint.keys()):
-            if 'transformer.h' in key:
-                split = key.split('.')
-                split[2] = partition_schedule[int(split[2])]
-                checkpoint[".".join(split)] = checkpoint.pop(key)
-        model.load_state_dict(checkpoint, strict=True)
-    
-    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
-
-    tokenizer = Tokenizer(tokenizer_path)
-    tokenizer_fn = lambda p: tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
-    
-    return model, tokenizer_fn
-
-
-def load_pythia(model_size, checkpoint_path):
-    assert(os.path.isdir(checkpoint_path))
-
-    print("Loading model... ", file=sys.stderr, end='')
-    t0 = time.time()
-
-    revisions = os.listdir(checkpoint_path)
-    # Revisions are of the format step{number}
-    revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
-    cache_dir = os.path.join(checkpoint_path, revision)
-
-    model = GPTNeoXForCausalLM.from_pretrained(
-        f"EleutherAI/pythia-{model_size}",
-        revision=revision,
-        cache_dir=cache_dir,
-        torch_dtype=DTYPE,
-        local_files_only=True,
-    )
-    model = model.to(device=DEVICE)
-    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
-
-    tokenizer= AutoTokenizer.from_pretrained(
-        f"EleutherAI/pythia-{model_size}",
-    )
-
-    tokenizer_fn = lambda p: (
-        tokenizer(p, return_tensors="pt")["input_ids"]
-        .squeeze(0)
-        .to(device=DEVICE)
-    )
-
-    return model, tokenizer_fn
+MAX_LEN = 2048
 
 
 def pythia_forward(model, embeddings=False):
@@ -147,14 +91,12 @@ def main(
             checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/models/pythia/pythia-{model_size}/'
         else:
             raise ValueError
-    else:
-        checkpoint_path = checkpoint_path
     
     if not tokenizer_path:
         if(model_type == "llama"):
             tokenizer_path = '/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model'
-    else:
-        tokenizer_path = tokenizer_path
+        elif(model_type == "pythia"):
+            pass # Not necessary
 
     assert not (return_embeddings and return_initial_embeddings), \
             "Only one of return_embeddings and return_initial_embeddings may be enabled"
@@ -165,11 +107,11 @@ def main(
     # Initialize the model and tokenizer
     if(model_type == "llama"):
         model, tokenizer = load_llama(
-            model_size, checkpoint_path, tokenizer_path, quantize
+            model_size, checkpoint_path, tokenizer_path, dtype, quantize
         )
     elif(model_type == "pythia"):
         model, tokenizer = load_pythia(
-            model_size, checkpoint_path
+            model_size, checkpoint_path, dtype
         )
     else:
         raise ValueError(f"Invalid model type: {model_type}")
@@ -225,9 +167,15 @@ def main(
             print(f'Skipping "{key}" (too short)...')
             continue
 
-        if((model_type == "llama" and len_prompt > model.config.block_size)):
-            print(f'Skipping "{key}" (too long)...')
-            continue
+        if(model_type == "llama"):
+            max_len = model.config.block_size
+        else:
+            max_len = MAX_LEN
+
+        if(len_prompt > max_len):
+            print(f'Truncating {key}...')
+            encoded_prompt = encoded_prompt[..., :max_len]
+            len_prompt = max_len
 
         # Run the model
         with torch.no_grad():
