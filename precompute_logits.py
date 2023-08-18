@@ -20,6 +20,7 @@ from lit_llama.utils import EmptyInitOnDevice, jsd
 from train_head_utils import (
     load_llama,
     load_pythia,
+    MAX_LEN,
 )
 
 
@@ -29,18 +30,26 @@ SUPPORTED_MODEL_TYPES = set([
     "llama",
     "pythia",
 ])
-MAX_LEN = 2048
 
 
-def pythia_forward(model, embeddings=False):
+def pythia_forward(model, embeddings=False, return_after_layer_n=None):
     def fw(input_ids):
-        return_dict = model.config.use_return_dict
         outputs = model.gpt_neox(
             input_ids=input_ids,
             attention_mask=torch.ones_like(input_ids),
-            return_dict=return_dict,
+            return_dict=True,
         )
-        hidden_states = outputs[0]
+
+        print(len(model.gpt_neox.layers))
+
+        if(return_after_layer_n is None):
+            return_after_layer_n = -1
+
+        hidden_states = outputs.hidden_states[return_after_layer_n][0]
+
+        print(hidden_states.shape)
+
+        exit()
 
         if(embeddings):
             return hidden_states
@@ -63,6 +72,7 @@ def main(
     output_shard_size: int = 2500,
     return_embeddings: bool = False,
     return_initial_embeddings: bool = False,
+    return_after_layer_n: Optional[int] = None,
     resume: bool = False,
 ) -> None:
     """Generates text samples based on a pre-trained LLaMA model and tokenizer.
@@ -98,8 +108,8 @@ def main(
         elif(model_type == "pythia"):
             pass # Not necessary
 
-    assert not (return_embeddings and return_initial_embeddings), \
-            "Only one of return_embeddings and return_initial_embeddings may be enabled"
+    assert sum([return_embeddings, return_initial_embeddings, return_after_layer_n is not None]), \
+            "Only one return type may be enabled"
 
     # Create the output dir
     os.makedirs(output_dir, exist_ok=True)
@@ -107,11 +117,11 @@ def main(
     # Initialize the model and tokenizer
     if(model_type == "llama"):
         model, tokenizer = load_llama(
-            model_size, checkpoint_path, tokenizer_path, dtype, quantize
+            model_size, checkpoint_path, tokenizer_path, DTYPE, quantize
         )
     elif(model_type == "pythia"):
         model, tokenizer = load_pythia(
-            model_size, checkpoint_path, dtype
+            model_size, checkpoint_path, DTYPE
         )
     else:
         raise ValueError(f"Invalid model type: {model_type}")
@@ -185,12 +195,20 @@ def main(
                     fn = model._forward
                 elif(return_initial_embeddings):
                     fn = model.embed_sequence
+                elif(return_after_layer_n):
+                    raise NotImplementedError
             elif(model_type == "pythia"):
                 fn = pythia_forward(model)
                 if(return_embeddings):
                     fn = pythia_forward(model, embeddings=True)
                 elif(return_initial_embeddings):
                     fn = model.gpt_neox.embed_in
+                elif(return_after_layer_n):
+                    fn = pythia_forward(
+                        model, 
+                        embeddings=True, 
+                        return_after_layer_n=return_after_layer_n
+                    )
 
             logits = fn(encoded_prompt)
 
