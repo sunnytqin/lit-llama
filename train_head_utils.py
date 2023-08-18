@@ -2,6 +2,7 @@ import logging
 import os
 import pickle
 import random
+import sys
 import time
 from typing import Optional, Iterator, Tuple
 
@@ -23,6 +24,8 @@ VOCAB_SIZES = {
     "llama": None,
     "pythia": 50254,
 }
+
+MAX_LEN = 2048
 
 
 class PrecomputedShardLoader:
