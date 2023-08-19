@@ -4,7 +4,7 @@ import pickle
 import random
 import sys
 import time
-from typing import Optional, Iterator, Tuple
+from typing import Optional, Iterator, Tuple, Sequence
 
 import torch
 import torch.nn as nn
@@ -30,7 +30,7 @@ MAX_LEN = 2048
 
 class PrecomputedShardLoader:
     def __init__(self, 
-        shard_dirs: list[str],
+        shard_dirs: Sequence[str],
         dataset_filter_path: Optional[str] = None,
     ):
         """
@@ -112,6 +112,10 @@ class PrecomputedShardLoader:
                     shard = loaded_shards[i]
                     for j in range(len(shard)):
                         k, v = shard[j]
+
+                        if(len(v.shape) == 1):
+                            v = v.unsqueeze(0)
+
                         shard[j] = (k, v[self.filter[k].bool()])
             
             yield from zip(*loaded_shards)

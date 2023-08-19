@@ -32,24 +32,16 @@ SUPPORTED_MODEL_TYPES = set([
 ])
 
 
-def pythia_forward(model, embeddings=False, return_after_layer_n=None):
+def pythia_forward(model, embeddings=False, return_after_layer_n=-1):
     def fw(input_ids):
         outputs = model.gpt_neox(
             input_ids=input_ids,
             attention_mask=torch.ones_like(input_ids),
+            output_hidden_states=True,
             return_dict=True,
         )
 
-        print(len(model.gpt_neox.layers))
-
-        if(return_after_layer_n is None):
-            return_after_layer_n = -1
-
-        hidden_states = outputs.hidden_states[return_after_layer_n][0]
-
-        print(hidden_states.shape)
-
-        exit()
+        hidden_states = outputs.hidden_states[return_after_layer_n]
 
         if(embeddings):
             return hidden_states
@@ -108,7 +100,7 @@ def main(
         elif(model_type == "pythia"):
             pass # Not necessary
 
-    assert sum([return_embeddings, return_initial_embeddings, return_after_layer_n is not None]), \
+    assert sum([return_embeddings, return_initial_embeddings, return_after_layer_n is not None]) <= 1, \
             "Only one return type may be enabled"
 
     # Create the output dir

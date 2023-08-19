@@ -22,6 +22,7 @@ from train_head_utils import (
     load_llama_tokenizer,
     load_pythia_tokenizer,
     PrecomputedShardLoader,
+    MAX_LEN,
     _preprocessor,
 )
 
@@ -138,6 +139,12 @@ def main(
         small_key, small_emb = small_tup
         large_key, large_emb = large_tup
 
+        # Patches up a previous bug in precompute_logits.py
+        if(len(small_emb.shape) == 1):
+            small_emb = small_emb.unsqueeze(0)
+        if(len(large_emb.shape) == 1):
+            large_emb = large_emb.unsqueeze(0)
+
         # Sanity check. The shards should be aligned such that the keys match.
         keys = set([t[0] for t in shard_tups])
         assert(len(keys) == 1)
@@ -213,7 +220,12 @@ def main(
         tic = time.time()
         dataset_tokens = {}
         for key, text in dataset.items():
-            dataset_tokens[key] = tokenizer(text)
+            tokens = tokenizer(text)[:MAX_LEN]
+
+            if(len(tokens) == 0):
+                continue
+
+            dataset_tokens[key] = tokens
 
         toc = time.time() - tic
         print(f"Tokenized dataset in {toc} seconds")
@@ -233,7 +245,7 @@ def main(
 
             # Quick sanity check
             assert(all(
-                len(tokens) == len(filters[label]) for label in filters
+                tokens.shape == filters[label].shape for label in filters
             ))
 
             for i, token in enumerate(tokens.tolist()):
