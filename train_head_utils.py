@@ -457,6 +457,9 @@ def _preprocessor(
             if(target_fn_name == "log_jsd"):
                 divergence = jsd(small_logits, large_logits)
 
+                # Sometimes precision errors cause divergence to be negative
+                divergence = torch.clamp(divergence, min=1e-8)
+
                 # We will predict the log of the divergence
                 target = torch.log(divergence)
 
