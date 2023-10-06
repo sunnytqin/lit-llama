@@ -48,6 +48,7 @@ wandb_metrics = set([
     ("train_accuracy", "step"),
     ("val_loss", "step"),
     ("val_accuracy", "step"),
+    ("val_entropy_threshold_acc", "step")
 ])
 
 
@@ -425,12 +426,10 @@ def main(
 
                     # Compute the accuracy of the simplest entropy threshold
                     small_entropy_threshold_acc = entropy_threshold_acc(val_stash["small_entropy"], all_val_gt)
-                    print(small_entropy_threshold_acc)
-                    exit()
 
                     val_metrics = {
                         "val_loss": val_loss_sum / val_batch_count,
-                        "entropy_threshold_acc": small_entropy_threshold_acc,
+                        "val_entropy_threshold_acc": small_entropy_threshold_acc,
                     }
 
                     print(f"Validation metric val_loss: {val_metrics['val_loss']}")
