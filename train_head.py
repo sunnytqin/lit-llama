@@ -20,6 +20,7 @@ from train_head_utils import (
     batch_loader,
     DistancePredictionHead,
     DistancePredictionHeadWithLMHead,
+    entropy_threshold_acc,
     load_lm_head,
     PrecomputedShardLoader,
     _preprocessor,
@@ -133,6 +134,8 @@ def main(
     max_bin: float = np.log(np.log(2)), # JSD is bounded by ln(2)
     target_fn_name: str = "log_jsd",
     glue_lm_head: bool = False,
+    use_logits_as_input: bool = False,
+    softmax_input_logits: bool = False,
     seed: int = 42,
     min_entropy: float = None,
     max_entropy: float = None,
@@ -275,7 +278,11 @@ def main(
         "activation": activation,
     }
     if(not glue_lm_head):
-        input_dim = small_lm_head.weight.shape[1]
+        if(use_logits_as_input):
+            input_dim = small_lm_head.weight.shape[0]
+        else:
+            input_dim = small_lm_head.weight.shape[1]
+
         if(provide_entropy_as_input):
             input_dim += 1
 
@@ -297,7 +304,7 @@ def main(
     logging.info(f"Loaded prediction head ({param_count} parameters)...")
 
     # Umm uhh
-    distance_prediction_head = torch.compile(distance_prediction_head)
+    #distance_prediction_head = torch.compile(distance_prediction_head)
 
     # Initialize the optimizer
     optimizer = torch.optim.Adam(
@@ -336,6 +343,8 @@ def main(
             min_entropy=min_entropy,
             max_entropy=max_entropy,
             provide_entropy_as_input=provide_entropy_as_input,
+            use_logits_as_input=use_logits_as_input,
+            softmax_input_logits=softmax_input_logits,
             target_fn_name=target_fn_name,
             bin_target=bin_target,
             device=DEVICE,
@@ -356,6 +365,7 @@ def main(
 
             # Periodically run the validation loop
             if(val and i % eval_every_n_batches == 0):
+                val_stash = {}
                 val_data_gen = _preprocessor(
                     shard_loader=val_logit_loader,
                     small_lm_head=small_lm_head,
@@ -367,10 +377,13 @@ def main(
                     min_entropy=min_entropy,
                     max_entropy=max_entropy,
                     provide_entropy_as_input=provide_entropy_as_input,
+                    use_logits_as_input=use_logits_as_input,
+                    softmax_input_logits=softmax_input_logits,
                     target_fn_name=target_fn_name,
                     bin_target=bin_target,
                     device=DEVICE,
                     dtype=DTYPE,
+                    _stash=val_stash, # used to smuggle out the entropy
                 )
 
                 val_bl = batch_loader(
@@ -410,8 +423,14 @@ def main(
                         all_val_preds.extend(val_preds.cpu().tolist())
                         all_val_gt.extend(val_targets.cpu().tolist())
 
+                    # Compute the accuracy of the simplest entropy threshold
+                    small_entropy_threshold_acc = entropy_threshold_acc(val_stash["small_entropy"], all_val_gt)
+                    print(small_entropy_threshold_acc)
+                    exit()
+
                     val_metrics = {
                         "val_loss": val_loss_sum / val_batch_count,
+                        "entropy_threshold_acc": small_entropy_threshold_acc,
                     }
 
                     print(f"Validation metric val_loss: {val_metrics['val_loss']}")

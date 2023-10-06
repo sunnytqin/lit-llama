@@ -14,6 +14,7 @@ from transformers import (
 )
 
 from lit_llama import LLaMA, Tokenizer
+from lit_llama.model import pipeLLaMA
 from lit_llama.utils import EmptyInitOnDevice, jsd
 
 
@@ -73,7 +74,6 @@ class PrecomputedShardLoader:
             shard_path = os.path.join(shard_dir, shard_name)
             with open(shard_path, "rb") as fp:
                 shard = pickle.load(fp)
-
             shards.append(shard)
 
         return shards
@@ -125,13 +125,14 @@ class PrecomputedShardLoader:
             del loaded_shards
 
 
-def load_llama_tokenizer(tokenizer_path, device):
+def load_llama_tokenizer(tokenizer_path, device, return_tokenizer_as_fn=True):
     tokenizer = Tokenizer(tokenizer_path)
-    tokenizer_fn = lambda p: tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
-    return tokenizer_fn
+    if(return_tokenizer_as_fn):
+        tokenizer = lambda p: tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
+    return tokenizer
 
 
-def load_llama(model_size, checkpoint_path, tokenizer_path, dtype, quantize):
+def load_llama(model_size, checkpoint_path, tokenizer_path, dtype, quantize, return_tokenizer_as_fn=True):
     assert(os.path.isfile(checkpoint_path))
     assert(os.path.isfile(tokenizer_path))
 
@@ -152,7 +153,9 @@ def load_llama(model_size, checkpoint_path, tokenizer_path, dtype, quantize):
     
     print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
-    tokenizer = load_llama_tokenizer(tokenizer_path, DEVICE)
+    tokenizer = load_llama_tokenizer(
+        tokenizer_path, DEVICE, return_tokenizer_as_fn=return_tokenizer_as_fn
+    )
     
     return model, tokenizer
 
@@ -385,6 +388,8 @@ def _preprocessor(
     min_entropy: float,
     max_entropy: float,
     provide_entropy_as_input: bool,
+    use_logits_as_input: bool,
+    softmax_input_logits: bool,
     device: torch.device,
     dtype: torch.dtype,
     target_fn_name="log_jsd",
@@ -431,6 +436,11 @@ def _preprocessor(
             # Softmax both sets of logits
             small_logits_softmax = torch.nn.functional.softmax(small_logits, dim=-1)
             large_logits_softmax = torch.nn.functional.softmax(large_logits, dim=-1)
+
+            if(softmax_input_logits and use_logits_as_input):
+                input_emb = small_logits_softmax
+            elif(use_logits_as_input):
+                input_emb = small_logits
 
             small_logs = torch.nn.functional.log_softmax(small_logits, dim=-1)
             small_entropy = torch.sum(-1 * small_logits_softmax * small_logs, dim=-1)
@@ -546,3 +556,28 @@ def batch_loader(
     # Serve the final batch, even if it's not full
     if(len(batch) > 0):
         yield _package_batch(batch)
+
+
+def entropy_threshold_acc(small_entropy, ground_truth):
+    sorted_pairs = list(sorted(zip(small_entropy, ground_truth), key=lambda x: x[0]))
+
+    ones_count = 0
+    ones_so_far = []
+    for s, gt in sorted_pairs:
+        if(gt == 1):
+            ones_count += 1
+        
+        ones_so_far.append(ones_count)
+
+    total_ones = ones_so_far[-1]
+    best_acc = -1
+    best_index = -1
+    for i in range(len(sorted_pairs)):
+        zeros_correct = i - ones_so_far[i] + 1
+        ones_correct = total_ones - ones_so_far[i]
+        acc = (zeros_correct + ones_correct) / len(sorted_pairs)
+        if(acc > best_acc):
+            best_acc = acc
+            best_index = i
+
+    return best_acc
