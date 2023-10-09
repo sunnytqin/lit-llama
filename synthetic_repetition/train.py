@@ -12,6 +12,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
 
 from data import (
+    compute_epistemic_collision_prob,
     SyntheticRepetitionDataset,
     SyntheticRepetitionTokenizer
 )
@@ -73,6 +74,16 @@ def _wandb_setup(args):
 
 
 def main(args):
+    # Print some stats about the current run
+    epistemic_collision_prob = compute_epistemic_collision_prob(
+        question_length=args.question_length,
+        epistemic_prob=args.epistemic_prob,
+        questions_per_sample=args.questions_per_sample,
+    )
+    print(f"Epistemic collision probability: {epistemic_collision_prob}")
+    print(f"Per batch: {1 - (1 - epistemic_collision_prob) ** args.batch_size}")
+    print(f"Seqlen: {args.questions_per_sample * (args.question_length + 1 + 1)}")
+
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
     if ddp:
         init_process_group(backend='nccl')
@@ -103,6 +114,7 @@ def main(args):
         question_length=args.question_length,
         epistemic_prob=args.epistemic_prob,
         questions_per_sample=args.questions_per_sample,
+        force_collision_prob=args.force_collision_prob,
         seed=args.seed + seed_offset,
     )
 
@@ -152,14 +164,15 @@ def main(args):
     scaler = torch.cuda.amp.GradScaler(enabled=False)
 
     # compile the model
-    #print("compiling the model... (takes a ~minute)")
-    #model = torch.compile(model) # requires PyTorch 2.0
+    print("compiling the model... (takes a ~minute)")
+    model = torch.compile(model) # requires PyTorch 2.0
 
     if(ddp):
         model = DDP(model, device_ids=[ddp_local_rank])
 
     def postprocess_batch(batch):
         questions, answers = batch
+        question_length = len(questions[0][0])
         prompts = []
         for question_set, answer_set in zip(zip(*questions), zip(*answers)):
             qa_tokens = [tokenizer.encode(f"{q}{a}") for q, a in zip(question_set, answer_set)]
@@ -172,10 +185,17 @@ def main(args):
 
         batch = torch.tensor(prompts, dtype=torch.long, device=device)
 
-        targets = batch[1:]
-        batch = batch[:-1]
+        targets = batch[..., 1:].contiguous()
 
-        return batch, targets
+        # We only care about the answer bits
+        masked_targets = targets.new_zeros(targets.shape)
+        masked_targets = masked_targets - 1
+        for i in range(question_length - 1, targets.shape[-1], question_length + 1 + 1):
+            masked_targets[..., i] = targets[..., i]
+
+        batch = batch[..., :-1].contiguous()
+
+        return batch, masked_targets
 
     @torch.no_grad()
     def estimate_loss():
@@ -285,7 +305,8 @@ def main(args):
             if local_iter_num >= 5: # let the training loop settle a bit
                 mfu = raw_model.estimate_mfu(args.batch_size * gradient_accumulation_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-            print(f"iter {batch_no}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+            
+            print(f"iter {batch_no}: loss {lossf:.4f}, time {dt*1000:.2f}ms, lr {lr:.2E}, mfu {running_mfu*100:.2f}%")
 
 
         local_iter_num += 1
@@ -297,27 +318,29 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--question_length", type=int, default=10)
+    parser.add_argument("--question_length", type=int, default=19)
     parser.add_argument("--epistemic_prob", type=float, default=0.5)
-    parser.add_argument("--questions_per_sample", type=int, default=2)
+    parser.add_argument("--questions_per_sample", type=int, default=25)
+    parser.add_argument("--force_collision_prob", type=float, default=0.5)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--n_layer", type=int, default=2)
-    parser.add_argument("--n_head", type=int, default=2)
-    parser.add_argument("--n_embd", type=int, default=384)
+    parser.add_argument("--n_layer", type=int, default=1)
+    parser.add_argument("--n_head", type=int, default=1)
+    parser.add_argument("--n_embd", type=int, default=128)
     parser.add_argument("--bias", type=bool, default=False)
     parser.add_argument("--dropout", type=float, default=0.)
     parser.add_argument("--learning_rate", type=float, default=6e-4)
     parser.add_argument("--decay_lr", type=bool, default=True)
     parser.add_argument("--lr_decay_iters", type=int, default=600000)
+    parser.add_argument("--min_lr", type=float, default=6e-5)
     parser.add_argument("--weight_decay", type=float, default=0.1)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
     parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--log_interval", type=int, default=1)
+    parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--max_iters", type=int, default=600000)
     parser.add_argument("--eval_iters", type=int, default=100)
-    parser.add_argument("--eval_interval", type=int, default=2000)
+    parser.add_argument("--eval_interval", type=int, default=500)
     parser.add_argument("--eval_only", type=bool, default=False)
     parser.add_argument("--warmup_iters", type=int, default=2000)
     parser.add_argument("--always_save_checkpoint", type=bool, default=True)
