@@ -22,7 +22,7 @@ FW = False
 model_size = "7B"
 checkpoint_path = "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/7B/lit-llama.pth"
 tokenizer_path = "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model"
-data_pairs_path = "data_plaintext.json"
+data_pairs_path = "filtered_data_plaintext.json"
 
 model, tokenizer = load_llama(
     model_size, checkpoint_path, tokenizer_path, DTYPE, quantize=None, return_tokenizer_as_fn=False
@@ -45,10 +45,6 @@ for property in data_pairs:
     if(not TEMPLATES[property]["type"] == "many_to_one"):
         continue
 
-    if(property != "P157"):
-        continue
-
-    #print(f"Property: {TEMPLATES[property]['name']}")
     if(FW):
         prompt = TEMPLATES[property]["prompt_fw"]
     else:
@@ -94,36 +90,36 @@ for property in data_pairs:
                 embeds = model._forward(encoded_sentence).detach().cpu()
 
                 ##### VISUAL INSPECTION #####
-                addl_tokens = 0
-                while True:
-                    logits = model(encoded_sentence).detach().cpu()
-                    best_token = torch.argmax(logits, dim=-1)[:, -1].to(DEVICE)
-                    encoded_sentence = torch.cat(
-                        [
-                            encoded_sentence,
-                            best_token[:, None],
-                        ],
-                        dim=-1
-                    )
-
-                    if(
-                        (best_token == period_id and encoded_sentence[..., -2] != one_id) or
-                        best_token == tokenizer.eos_id
-                    ):
-                        break
-
-                    addl_tokens += 1
-                    if(addl_tokens >= addl_token_limit):
-                        break
-                
-                generated_tokens = encoded_sentence[0, prompt_len:]
-                decoded_sentence = tokenizer.decode(generated_tokens)
-                print(f"Prompt: {sentence}")
-                print(f"Prediction: {decoded_sentence}")
-                print(f"Key: {key}")
-                print(f"Value: {value}")
-                is_correct = value in decoded_sentence
-
+#                addl_tokens = 0
+#                while True:
+#                    logits = model(encoded_sentence).detach().cpu()
+#                    best_token = torch.argmax(logits, dim=-1)[:, -1].to(DEVICE)
+#                    encoded_sentence = torch.cat(
+#                        [
+#                            encoded_sentence,
+#                            best_token[:, None],
+#                        ],
+#                        dim=-1
+#                    )
+#
+#                    if(
+#                        (best_token == period_id and encoded_sentence[..., -2] != one_id) or
+#                        best_token == tokenizer.eos_id
+#                    ):
+#                        break
+#
+#                    addl_tokens += 1
+#                    if(addl_tokens >= addl_token_limit):
+#                        break
+#                
+#                generated_tokens = encoded_sentence[0, prompt_len:]
+#                decoded_sentence = tokenizer.decode(generated_tokens)
+#                print(f"Prompt: {sentence}")
+#                print(f"Prediction: {decoded_sentence}")
+#                print(f"Key: {key}")
+#                print(f"Value: {value}")
+#                is_correct = value in decoded_sentence
+#
                 #print(is_correct)
                 ##### END VISUAL INSPECTION #####
 
