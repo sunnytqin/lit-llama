@@ -7,20 +7,31 @@ import torch
 import torch.nn as nn
 
 import matplotlib.pyplot as plt
-from generate_from_logits import load_lm_head
+from train_head_utils import load_lm_head
 from repetition import compute_entropy
+from transformers import (
+    AutoTokenizer,
+)
+from lit_llama import Tokenizer
+
 
 DEVICE="cuda"
 # DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
 DTYPE = torch.float32
+DEFAULT_MODEL_DIRS = {
+    "llama": "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama",
+    "pythia": "/n/holystore01/LABS/barak_lab/Everyone/pythia",
+}
 
 def main(
     *,
     repetition_dir: str, 
-    output_dir: str,
+    model_type: str,
+    model_size: str,
     small_checkpoint_path: str = None,
+    tokenizer_path: str = None, 
+    output_dir: str = None,
     seed: int = 42,
-    model_size: str = "7B"
 ) -> None:
     """
     Args:
@@ -36,20 +47,48 @@ def main(
     random.seed(seed)
 
     if not small_checkpoint_path:
-        small_checkpoint_path = Path(f"/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/lit-llama.pth")
-    assert small_checkpoint_path.is_file()
+        default_model_dir = DEFAULT_MODEL_DIRS[model_type]
+        if(model_type == "llama"):
+            small_checkpoint_path = Path(f"{default_model_dir}/{model_size}/lit-llama.pth")
+        elif(model_type == "pythia"):
+            small_checkpoint_path = Path(f"{default_model_dir}/pythia-{model_size}/")
+        else:
+            raise ValueError
 
-    lm_head = load_lm_head(small_checkpoint_path, DTYPE)
+    assert small_checkpoint_path.exists()
+
+    if not tokenizer_path:
+        if(model_type == "llama"):
+            tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model')
+        elif(model_type == "pythia"):
+            pass # Not necessary
+
+    # load lm head
+    lm_head = load_lm_head(
+        small_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=model_size
+    )
     print("small lm head loaded")
+
+    # load tokenizer
+    global tokenizer 
+    if model_type == "pythia":
+        tokenizer= AutoTokenizer.from_pretrained(
+            f"EleutherAI/pythia-{model_size}",
+        )
+    elif model_type == "llama": 
+        tokenizer = Tokenizer(tokenizer_path)
 
     repetition_shards = os.listdir(repetition_dir)
     repetition_shards = list(sorted(repetition_shards, key=lambda x: int(x.split('_')[-1].strip('.pt'))))
     print(repetition_shards)
 
+    global encoded_prompts, large_entropy, original_prediction
+
     new_embed_all = []
     original_embed_all = []
     large_entropy = []
     prompt_type = []
+    encoded_prompts = []
     for repetition_shard in repetition_shards:
         shard_path = os.path.join(repetition_dir, repetition_shard)
         data = torch.load(shard_path, map_location=DEVICE)
@@ -59,16 +98,23 @@ def main(
         n_samples = data["new_embed"].shape[0]
         large_entropy.append(torch.concatenate(data["large_entropy"][0: n_samples]).cpu())
         prompt_type.append((data["prompt_type"][0: n_samples]).bool().cpu())
+        encoded_prompts += data["encoded_prompt"]
 
     new_embed_all = torch.concatenate(new_embed_all)
     original_embed_all = torch.concatenate(original_embed_all)
     large_entropy = torch.concatenate(large_entropy)
     prompt_type = torch.concatenate(prompt_type)
+    # print("shape checks: ", new_embed_all.shape, original_embed_all.shape, large_entropy.shape, prompt_type.shape, len(encoded_prompts))
     print("shape checks: ", new_embed_all.shape, original_embed_all.shape, large_entropy.shape, prompt_type.shape)
 
-    original_logits = lm_head(original_embed_all).detach()
+    original_logits = []
+    new_logits = []
+    for i in range(len(original_embed_all)):
+        original_logits.append(lm_head(original_embed_all[i]).detach())
+    original_logits = torch.stack(original_logits)
+
     new_logits = lm_head(new_embed_all).detach()
-    print("logits shape: ", original_logits.shape, new_logits.shape)
+    print("logits shape: ", original_logits.shape)
 
     original_probs = torch.softmax(original_logits, dim=-1)
     new_probs = torch.softmax(new_logits, dim=-1)
@@ -76,18 +122,25 @@ def main(
     original_entropy = compute_entropy(original_logits.cpu())
     new_entropy = compute_entropy(new_logits.cpu())
 
-    global img_output_dir
-    img_output_dir = output_dir
+    original_prediction = torch.argmax(original_probs, dim=-1)
 
-    plot_entropy(original_entropy.numpy(), new_entropy.numpy(), large_entropy.numpy(), prompt_type.numpy())
+    global img_output_dir
+    if output_dir is not None:
+        img_output_dir = output_dir
+    else: 
+        img_output_dir = os.path.join(os.path.dirname(repetition_dir), "results")
+        Path(img_output_dir).mkdir(parents=True, exist_ok=True)
+
+
+    # plot_entropy(original_entropy.numpy(), new_entropy.numpy(), large_entropy.numpy(), prompt_type.numpy())
 
     mutual_information(original_probs, new_probs, prompt_type)
 
-    probs_norm(original_probs, new_probs, prompt_type)
+    # probs_norm(original_probs, new_probs, prompt_type)
 
-    kl_divergence(original_probs, new_probs, prompt_type)
+    # kl_divergence(original_probs, new_probs, prompt_type)
 
-    weighted_entropy(original_entropy, new_entropy, original_probs, prompt_type)
+    # weighted_entropy(original_entropy, new_entropy, original_probs, prompt_type)
 
     return
 
@@ -97,10 +150,11 @@ def weighted_entropy(original_entropy, new_entropy, original_probs, prompt_type)
     p_x = torch.div(p_x, p_x.sum(dim=1, keepdim=True)).cpu()
 
     weighted_entropy = (new_entropy * p_x).sum(dim=1)
+    print("weighted entropy:", weighted_entropy.shape, (weighted_entropy<1.47).sum())
 
     plt.figure()
-    plt.hist(weighted_entropy[prompt_type].cpu().numpy()/ original_entropy[prompt_type].cpu().numpy(), bins=30, histtype="step", label="low_e_high_a")
-    plt.hist(weighted_entropy[~prompt_type].cpu().numpy()/original_entropy[~prompt_type].cpu().numpy(), bins=30, histtype="step", label="high_e_low_a")
+    plt.hist(weighted_entropy[prompt_type].cpu().numpy(), bins=30, histtype="step", label="low_e_high_a")
+    plt.hist(weighted_entropy[~prompt_type].cpu().numpy(), bins=30, histtype="step", label="high_e_low_a")
     plt.xlabel("Weighted Entropy")
     plt.ylabel("Count")
     plt.legend()
@@ -175,16 +229,16 @@ def mutual_information(x_probs, y_probs, prompt_type):
 
     print(top_k_idx.shape, y_probs.shape)
 
-    # # if choose to restrict the support of Y to only top K tokens
-    # p_y_given_x = torch.empty(p_x.shape[0], p_x.shape[1], p_x.shape[1], device=p_x.device)
-    # for i in range(top_k_idx.shape[0]):
-    #     ii_idx = top_k_idx[i]
-    #     for j in range(top_k_idx.shape[1]):
-    #         p_y_given_x[i, j, :] = y_probs[i, j, ii_idx]
-    # p_y_given_x = torch.div(p_y_given_x, p_y_given_x.sum(dim=2, keepdim=True))
+    # if choose to restrict the support of Y to only top K tokens
+    p_y_given_x = torch.empty(p_x.shape[0], p_x.shape[1], p_x.shape[1], device=p_x.device)
+    for i in range(top_k_idx.shape[0]):
+        ii_idx = top_k_idx[i]
+        for j in range(top_k_idx.shape[1]):
+            p_y_given_x[i, j, :] = y_probs[i, j, ii_idx]
+    p_y_given_x = torch.div(p_y_given_x, p_y_given_x.sum(dim=2, keepdim=True))
     
     # if choose support of Y to be all tokens
-    p_y_given_x = y_probs
+    # p_y_given_x = y_probs
 
     p_xy = torch.mul(p_x.unsqueeze(-1), p_y_given_x)
     
@@ -301,8 +355,6 @@ def plot_entropy(original_entropy, new_entropy, large_entropy, prompt_type):
     plt.legend()
 
     plt.subplot(2, 2, 4)
-    plt.hist(original_entropy[prompt_type].flatten() - new_entropy[prompt_type].max(axis=1), bins=50, histtype="step", label="MAX(new low_e_high_a)")
-    plt.hist(original_entropy[~prompt_type].flatten() - new_entropy[~prompt_type].max(axis=1), bins=50, histtype="step", label="MAX(new high_e_low_a)")
     plt.hist(original_entropy[prompt_type].flatten(), bins=30, histtype="step", label="original low_e_high_a", alpha=0.5)
     plt.hist(original_entropy[~prompt_type].flatten(), bins=30, histtype="step", label="original high_e_low_a", alpha=0.5)
     plt.xlabel("Entropy")
@@ -320,7 +372,7 @@ def plot_entropy(original_entropy, new_entropy, large_entropy, prompt_type):
     plt.xlabel("Original Entropy")
     plt.ylabel("Count")
     plt.legend()
-    plt.savefig("results/original_entropy.png")
+    plt.savefig(f"{img_output_dir}/original_entropy.png")
 
     print("--- original entropy classifier ---")
     simple_classification(torch.from_numpy(original_entropy).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
@@ -349,7 +401,7 @@ def simple_classification(x_train, y_train):
     optimizer = torch.optim.SGD(model.parameters(), lr=0.2)
 
     all_loss = []
-    for i in range(1001):
+    for i in range(2001):
         output = model(x_train)
 
         loss = criterion(output.view(-1), y_train.float())
@@ -360,9 +412,42 @@ def simple_classification(x_train, y_train):
         optimizer.zero_grad()
 
         if i % 200 == 0: 
-            prediction = output.view(-1) > 0
+            prediction = output.detach().view(-1) > 0
             accuracy = torch.sum((prediction==y_train).bool()) / y_train.shape[0]
             print(f"\tEpoch {i}, Loss:{loss.item():.3f}, Acc:{accuracy.item():.2f}")
+
+    # output = output.view(-1).detach()
+    # # most wrong examples
+    # for type in [0, 1]:
+    #     wrong_idx = torch.argwhere((prediction!=y_train)&(y_train == type)).view(-1)
+    #     wrong_idx_topk = torch.topk(output[wrong_idx], k=20, largest=not bool(type)).indices
+    #     wrong_idx = wrong_idx[wrong_idx_topk]
+    #     for p in wrong_idx:
+    #         if type == 0:
+    #             print(f"\n************ example: true type=epistemic, predicted type=aleatoric ************\n")
+    #         elif type == 1:
+    #             print(f"\n************ example: true type=aleatoric, predicted type=epistemic ************\n")
+    #         decoded_prompt = tokenizer.decode(encoded_prompts[p].squeeze())
+    #         decoded_prediction = tokenizer.decode(original_prediction[p])
+    #         print(f"{decoded_prompt} [{decoded_prediction} (H={large_entropy[p]:.2f})]")
+
+    # # most correct  examples
+    # for type in [0, 1]:
+    #     wrong_idx = torch.argwhere((prediction==y_train)&(y_train == type)).view(-1)
+    #     wrong_idx_topk = torch.topk(output[wrong_idx], k=20, largest=bool(type)).indices
+    #     wrong_idx = wrong_idx[wrong_idx_topk]
+    #     for p in wrong_idx:
+    #         if type == 0:
+    #             print(f"\n************ example: true type=epistemic, predicted type=epistemic ************\n")
+    #         elif type == 1:
+    #             print(f"\n************ example: true type=aleatoric, predicted type=aleatoric ************\n")
+
+    #         decoded_prompt = tokenizer.decode(encoded_prompts[p].squeeze())
+    #         decoded_prediction = tokenizer.decode(original_prediction[p])
+    #         print(f"{decoded_prompt} [{decoded_prediction} (H={large_entropy[p]:.2f})]")
+
+
+    return
 
 
     

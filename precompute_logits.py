@@ -14,9 +14,6 @@ from transformers import (
     AutoTokenizer,
 )
 
-from lit_llama import LLaMA, Tokenizer
-from lit_llama.model import pipeLLaMA, LLaMAConfig
-from lit_llama.utils import EmptyInitOnDevice, jsd
 from train_head_utils import (
     load_llama,
     load_pythia,
@@ -24,7 +21,7 @@ from train_head_utils import (
 )
 
 
-DTYPE = torch.bfloat16
+DTYPE = torch.float32
 DEVICE = torch.device('cuda:0')
 SUPPORTED_MODEL_TYPES = set([
     "llama",
@@ -90,7 +87,7 @@ def main(
         if(model_type == "llama"):
             checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/lit-llama.pth'
         elif(model_type == "pythia"):
-            checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/models/pythia/pythia-{model_size}/'
+            checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/pythia/pythia-{model_size}/'
         else:
             raise ValueError
     
@@ -144,6 +141,7 @@ def main(
     skip = False
     outputs = {}
     for i, (key, prompt) in enumerate(prompts):
+        if shard_count == 5: break
         # Write shard
         if(i != 0 and i % output_shard_size == 0):
             if(len(outputs)):

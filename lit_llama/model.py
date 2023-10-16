@@ -308,6 +308,8 @@ def ppLLaMA(config: LLaMAConfig):
         if torch.cuda.device_count() < num_gpus:
             print(f'Need at least {num_gpus} GPU devices for inference')
             sys.exit(0)
+        else:
+            num_gpus = torch.cuda.device_count()
         print("GPU count: ", torch.cuda.device_count())
         device = torch.device("cuda")
 
