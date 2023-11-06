@@ -13,13 +13,13 @@ import lightning as L
 import numpy as np
 import torch
 import torch.nn as nn
-# import wandb
 
 from lit_llama import LLaMA, Tokenizer
 from train_head_utils import (
     batch_loader,
     load_lm_head,
     load_llama_tokenizer,
+    load_llama_2_tokenizer,
     load_pythia_tokenizer,
     PrecomputedShardLoader,
     MAX_LEN,
@@ -38,7 +38,8 @@ approximately equal to the proportion of examples with high large model entropy.
 DTYPE = torch.float32
 DEVICE = torch.device("cuda:0")
 DEFAULT_MODEL_DIRS = {
-    "llama": "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama",
+    "llama": "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/",
+    "llama_2": "/n/holyscratch01/barak_lab/Everyone/lit-gpt_llama_2/",
     "pythia": "/n/holystore01/LABS/barak_lab/Everyone/models/pythia/",
 }
 
@@ -61,6 +62,7 @@ def main(
     zero_entropy_threshold: float = 0.2,
     balanced_classes: bool = True,
     shard_output: bool = False,
+    small_model_revision: int = -1,
     seed: int = 42,
 ) -> None:
     """
@@ -90,6 +92,8 @@ def main(
         default_model_dir = DEFAULT_MODEL_DIRS[model_type]
         if(model_type == "llama"):
             small_checkpoint_path = f"{default_model_dir}/{small_model_size}/lit-llama.pth"
+        elif(model_type == "llama_2"):
+            small_checkpoint_path = f"{default_model_dir}/Llama-2-{small_model_size}-hf/"
         elif(model_type == "pythia"):
             small_checkpoint_path = f"{default_model_dir}/pythia-1.4b/"
         else:
@@ -98,6 +102,8 @@ def main(
     if not large_checkpoint_path:
         if(model_type == "llama"):
             large_checkpoint_path = f"{default_model_dir}/{large_model_size}/lit-llama.pth"
+        elif(model_type == "llama_2"):
+            large_checkpoint_path = f"{default_model_dir}/Llama-2-{large_model_size}-hf/"
         elif(model_type == "pythia"):
             large_checkpoint_path = f"{default_model_dir}/pythia-12b/"
         else:
@@ -106,13 +112,15 @@ def main(
     if not tokenizer_path:
         if(model_type == "llama"):
             tokenizer_path = '/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model'
+        elif(model_type == "llama_2"):
+            pass # Not necessary
         elif(model_type == "pythia"):
             pass # Not necessary
 
     # Load the (small) LM heads of both the small and the large model.
     # We've only cached the embeddings and not the (much larger) logits.
     small_lm_head = load_lm_head(
-        small_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=small_model_size
+        small_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=small_model_size, revision=small_model_revision
     )
     large_lm_head = load_lm_head(
         large_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=large_model_size
@@ -130,6 +138,7 @@ def main(
     by_label = {}
     small_entropy_dict = {}
     large_entropy_dict = {}
+    count = 0
     for i, shard_tups in enumerate(logit_loader):
         if(i % 1000 == 0):
             print(i)
@@ -152,6 +161,9 @@ def main(
         small_emb = small_emb.to(device=DEVICE, dtype=DTYPE)
         large_emb = large_emb.to(device=DEVICE, dtype=DTYPE)
 
+        small_emb = small_emb[:MAX_LEN]
+        large_emb = large_emb[:MAX_LEN]
+
         with torch.no_grad():
             # Compute logits from the small model embeddings
             small_logits = small_lm_head(small_emb)
@@ -167,17 +179,52 @@ def main(
             large_logs = torch.nn.functional.log_softmax(large_logits, dim=-1)
             large_entropy = torch.sum(-1 * large_logits_softmax * large_logs, dim=-1)
 
+#            print(f"Mean: {torch.mean(small_entropy)}")
+#            print(f"Median: {torch.median(small_entropy)}")
+
             small_entropy_in_range = torch.logical_and(
                 small_entropy >= entropy_min, 
                 small_entropy < entropy_max,
             )
+
+            #print(f"SEIR: {torch.mean(small_entropy_in_range.float())}")
+#
+#            ranges = [
+#                (2, 3),
+#                (3, 4),
+#                (4, 5),
+#                (5, 6),
+#                (6, 7),
+#            ]
+#
+#            for l, h in ranges:
+#                seir = torch.logical_and(
+#                    small_entropy >= l, 
+#                    small_entropy < h,
+#                )
+#    
+#                print(f"SEIR ({l}, {h}): {torch.mean(seir.float())}")
 
             large_entropy_in_range = torch.logical_and(
                 large_entropy >= small_entropy - entropy_delta, 
                 large_entropy <= small_entropy + entropy_delta,
             )
 
+#            print(f"LAIR: {torch.mean(large_entropy_in_range.float())}")
+#            
+#            zero_entropy_thresholds = [
+#                0.5,
+#                1,
+#                2,
+#                3,
+#            ]
+#
+#            for zet in zero_entropy_thresholds:
+#                print(f"{zet}: {torch.mean((large_entropy < zet).float())}")
+
             large_entropy_zero = large_entropy < zero_entropy_threshold
+
+#            print(f"LAZ: {torch.mean(large_entropy_zero.float())}")
 
             # e = epistemic, a = aleatoric
             high_e_low_a = torch.logical_and(
@@ -198,7 +245,11 @@ def main(
 
             small_entropy_dict[small_key] = small_entropy
             large_entropy_dict[small_key] = large_entropy
-            
+
+            count += torch.sum(small_entropy_in_range)
+
+    print(count)
+
     # Balance the classes
     if(balanced_classes):
         # First, we need to balance individual token counts between classes
@@ -206,6 +257,8 @@ def main(
         # Load the tokenizer
         if(model_type == "llama"):
             tokenizer = load_llama_tokenizer(tokenizer_path, device=DEVICE)
+        elif(model_type == "llama_2"):
+            tokenizer = load_llama_2_tokenizer(small_checkpoint_path, device=DEVICE)
         elif(model_type == "pythia"):
             tokenizer = load_pythia_tokenizer(small_model_size, device=DEVICE)
         else:
