@@ -63,6 +63,7 @@ def main(
     balanced_classes: bool = True,
     shard_output: bool = False,
     small_model_revision: int = -1,
+    shard_size: int = 200, 
     seed: int = 42,
 ) -> None:
     """
@@ -87,6 +88,9 @@ def main(
 
     # Make the output directory
     os.makedirs(output_dir, exist_ok=True)
+    for nn in ['filter', 'large_entropy', 'small_entropy']:
+        inner_dir = os.path.join(output_dir, nn)
+        os.makedirs(inner_dir, exist_ok=True)
 
     if not small_checkpoint_path:
         default_model_dir = DEFAULT_MODEL_DIRS[model_type]
@@ -95,7 +99,8 @@ def main(
         elif(model_type == "llama_2"):
             small_checkpoint_path = f"{default_model_dir}/Llama-2-{small_model_size}-hf/"
         elif(model_type == "pythia"):
-            small_checkpoint_path = f"{default_model_dir}/pythia-1.4b/"
+            small_checkpoint_path = f"{default_model_dir}/pythia-{small_model_size}/"
+            # small_model_size = '1.4b'
         else:
             raise ValueError
 
@@ -105,7 +110,8 @@ def main(
         elif(model_type == "llama_2"):
             large_checkpoint_path = f"{default_model_dir}/Llama-2-{large_model_size}-hf/"
         elif(model_type == "pythia"):
-            large_checkpoint_path = f"{default_model_dir}/pythia-12b/"
+            large_checkpoint_path = f"{default_model_dir}/pythia-{large_model_size}/"
+            # large_model_size = '12b'
         else:
             raise ValueError
 
@@ -411,28 +417,57 @@ def main(
         }
 
         print(f"New sizes: {new_sizes}")
+        
+    # Not balance the classes
+    else:
+        sizes = {
+            "0": sum([torch.sum(v) for v in by_label["0"].values()]),
+            "1": sum([torch.sum(v) for v in by_label["1"].values()]),
+         }
+        print(f"Initial sizes: {sizes}")
+        
+        max_class = max(sizes, key=sizes.get)
+        min_class = min(sizes, key=sizes.get)
+
+        fraction = sizes[min_class] / sizes[max_class]
+
+        for key, f in by_label[max_class].items():
+            subsample_mask = torch.rand(f.shape, device=f.device) <= fraction
+            filtered = torch.logical_and(f, subsample_mask)
+            filt[key] = torch.logical_or(
+                by_label[min_class][key],
+                filtered,
+            )
+
+            by_label[max_class][key] = filtered
+
+        new_sizes = {
+            "0": sum([torch.sum(v) for v in by_label["0"].values()]),
+            "1": sum([torch.sum(v) for v in by_label["1"].values()]),
+        }
+
+        print(f"New sizes: {new_sizes}")
 
     if(shard_output):
         # split into smaller shards for repetition experiment
-        out_put_shard_size = 200
         filt_shard = {}
         filt_sum = 0 
         small_entropy_shard = {}
         large_entropy_shard = {}
         shard_count = 0
         for k,v in filt.items():
-            if filt_sum >= out_put_shard_size: 
-                print("filter sum: ", filt_sum, len(filt_shard))
+            if filt_sum >= shard_size: 
+                print(f"shard {shard_count}, filter sum: {filt_sum}, {len(filt_shard)}")
     
                 output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
                 with open(output_path, "wb") as fp:
                     pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
     
-                output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
+                output_path = os.path.join(output_dir, "small_entropy", f"small_entropy_{shard_count}.pickle")
                 with open(output_path, "wb") as fp:
                     pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
     
-                output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
+                output_path = os.path.join(output_dir, "large_entropy", f"large_entropy_{shard_count}.pickle")
                 with open(output_path, "wb") as fp:
                     pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
                 shard_count += 1
@@ -445,16 +480,17 @@ def main(
             filt_sum += v.sum()
         
         # save the final batch 
-        shard_count += 1
+        # shard_count += 1
+        print(f"shard {shard_count}, filter sum: {filt_sum}, {len(filt_shard)}")
         output_path = os.path.join(output_dir, "filter", f"filter_{shard_count}.pickle")
         with open(output_path, "wb") as fp:
             pickle.dump(filt_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
     
-        output_path = os.path.join(output_dir, f"small_entropy_{shard_count}.pickle")
+        output_path = os.path.join(output_dir, "small_entropy", f"small_entropy_{shard_count}.pickle")
         with open(output_path, "wb") as fp:
             pickle.dump(small_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
     
-        output_path = os.path.join(output_dir, f"large_entropy_{shard_count}.pickle")
+        output_path = os.path.join(output_dir, "large_entropy", f"large_entropy_{shard_count}.pickle")
         with open(output_path, "wb") as fp:
             pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
     else:

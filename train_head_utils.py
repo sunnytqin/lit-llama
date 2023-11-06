@@ -15,6 +15,7 @@ from transformers import (
     GPTNeoXForCausalLM,
 )
 
+<<<<<<< HEAD
 import lit_gpt
 from lit_gpt.model import Block
 from lit_gpt.utils import (
@@ -23,7 +24,11 @@ from lit_gpt.utils import (
     load_checkpoint, 
     quantization,
 )
-from lit_llama import LLaMA, Tokenizer
+from lit_llama import (
+    LLaMA, 
+    Tokenizer,
+    pipeLLaMA,
+)
 from lit_llama.model import pipeLLaMA
 from lit_llama.utils import EmptyInitOnDevice, jsd
 
@@ -155,6 +160,7 @@ def load_llama(model_size, checkpoint_path, tokenizer_path, dtype, quantize, ret
         device=DEVICE, dtype=dtype, quantization_mode=quantize
     ):
         model = pipeLLaMA.from_name(model_size)
+        # model = LLaMA.from_name(model_size)
         partition_schedule = model.partition_schedule
         checkpoint = torch.load(checkpoint_path)
         for key in list(checkpoint.keys()):
@@ -248,13 +254,14 @@ def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype,
 
     print(revision)
     cache_dir = os.path.join(checkpoint_path, revision)
+    print("Pythia revision:", revision, "cache_dir:", cache_dir)
 
     model = GPTNeoXForCausalLM.from_pretrained(
         f"EleutherAI/pythia-{model_size}",
         revision=revision,
         cache_dir=cache_dir,
         torch_dtype=dtype,
-        local_files_only=True,
+        local_files_only=False,
     )
 
     return model
@@ -266,7 +273,7 @@ def load_pythia_tokenizer(model_size, device):
     )
 
     tokenizer_fn = lambda p: (
-        tokenizer(p, return_tensors="pt")["input_ids"]
+        tokenizer(p, return_tensors="pt", add_special_tokens=True)["input_ids"]
         .squeeze(0)
         .to(device=DEVICE)
     )
@@ -275,7 +282,6 @@ def load_pythia_tokenizer(model_size, device):
 
 
 def load_pythia(model_size, checkpoint_path, dtype, revision=-1):
-    print(checkpoint_path)
     assert(os.path.isdir(checkpoint_path))
 
     print("Loading model... ", file=sys.stderr, end='')

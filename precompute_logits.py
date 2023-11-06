@@ -99,7 +99,7 @@ def main(
         elif(model_type == "llama_2"):
             checkpoint_path = f'/n/holyscratch01/barak_lab/Everyone/lit-gpt_llama_2/Llama-2-{model_size}-hf/'
         elif(model_type == "pythia"):
-            checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/models/pythia/pythia-{model_size}/'
+            checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/pythia/pythia-{model_size}/'
         else:
             raise ValueError
     
@@ -160,6 +160,7 @@ def main(
     skip = False
     outputs = {}
     for i, (key, prompt) in enumerate(prompts):
+        if shard_count == 5: break
         # Write shard
         if(i != 0 and i % output_shard_size == 0):
             if(len(outputs)):
