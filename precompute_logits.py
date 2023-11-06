@@ -160,7 +160,6 @@ def main(
     skip = False
     outputs = {}
     for i, (key, prompt) in enumerate(prompts):
-        if shard_count == 5: break
         # Write shard
         if(i != 0 and i % output_shard_size == 0):
             if(len(outputs)):
