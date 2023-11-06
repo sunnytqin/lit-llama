@@ -15,7 +15,6 @@ from transformers import (
     GPTNeoXForCausalLM,
 )
 
-<<<<<<< HEAD
 import lit_gpt
 from lit_gpt.model import Block
 from lit_gpt.utils import (
