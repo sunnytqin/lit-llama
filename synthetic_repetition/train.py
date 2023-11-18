@@ -127,6 +127,7 @@ def main(args):
         question_length=args.question_length,
         epistemic_prob=args.epistemic_prob,
         questions_per_sample=args.questions_per_sample,
+        force_collision_prob=args.force_collision_prob,
         seed=args.seed + ddp_world_size + 1,
     )
 
@@ -192,6 +193,7 @@ def main(args):
         masked_targets = masked_targets - 1
         for i in range(question_length - 1, targets.shape[-1], question_length + 1 + 1):
             masked_targets[..., i] = targets[..., i]
+            assert(torch.all(targets[..., i + 1] == tokenizer.eos_token_id))
 
         batch = batch[..., :-1].contiguous()
 
@@ -320,12 +322,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--question_length", type=int, default=19)
     parser.add_argument("--epistemic_prob", type=float, default=0.5)
-    parser.add_argument("--questions_per_sample", type=int, default=25)
-    parser.add_argument("--force_collision_prob", type=float, default=0.5)
+    parser.add_argument("--questions_per_sample", type=int, default=15)
+    parser.add_argument("--force_collision_prob", type=float, default=0.8)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--n_layer", type=int, default=1)
-    parser.add_argument("--n_head", type=int, default=1)
+    parser.add_argument("--n_layer", type=int, default=4)
+    parser.add_argument("--n_head", type=int, default=4)
     parser.add_argument("--n_embd", type=int, default=128)
     parser.add_argument("--bias", type=bool, default=False)
     parser.add_argument("--dropout", type=float, default=0.)

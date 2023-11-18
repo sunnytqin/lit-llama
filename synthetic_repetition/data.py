@@ -85,6 +85,7 @@ def generate_synthetic_repetition_dataset(
     assert(question_length > 1)
 
     sample = []
+    epistemic_qs = []
     while True:
         # Determine if the question is epistemic or aleatoric
         first_bit = 0 if random_gen.random() < epistemic_prob else 1
@@ -92,6 +93,15 @@ def generate_synthetic_repetition_dataset(
         # Generate the rest of the question
         remaining_bits = ''
         q = random_gen.randint(0, 2 ** (question_length - 1) - 1)
+        
+        if(first_bit == 0):
+            # Epistemic
+            if(random_gen.random() < force_collision_prob and len(epistemic_qs) > 0):
+                # Force a collision
+                q = epistemic_qs[random_gen.randint(0, len(epistemic_qs) - 1)]
+            else:
+                epistemic_qs.append(q)
+
         remaining_bits = bin(q)[2:].zfill((question_length - 1))
         q_str = f"{first_bit}{remaining_bits}"
 
@@ -106,17 +116,10 @@ def generate_synthetic_repetition_dataset(
         sample.append((q_str, str(a)))
 
         if(len(sample) == questions_per_sample):
-            if(force_collision_prob > 0):
-                # Determine if we need to force a collision
-                if(random_gen.random() < force_collision_prob):
-                    idx_to = random_gen.randint(0, questions_per_sample - 1)
-                    offset = random_gen.randint(1, questions_per_sample - 1)
-                    sample[idx_to] = sample[(idx_to + offset) % questions_per_sample]
-
-
             yield list(zip(*sample))
 
             sample = []
+            epistemic_qs = []
 
 
 def get_answer(epistemic_question):
