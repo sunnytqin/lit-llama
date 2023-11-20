@@ -11,7 +11,9 @@ import torch.nn as nn
 from transformers import (
     AutoTokenizer,
     GPTNeoXForCausalLM,
+    LlamaForCausalLM,
 )
+from pathlib import Path
 
 from lit_llama import LLaMA, Tokenizer, pipeLLaMA
 from lit_llama.utils import EmptyInitOnDevice, jsd
@@ -127,7 +129,9 @@ class PrecomputedShardLoader:
 def load_llama_tokenizer(tokenizer_path, device, return_tokenizer_as_fn=True):
     tokenizer = Tokenizer(tokenizer_path)
     if(return_tokenizer_as_fn):
-        tokenizer = lambda p: tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
+        def tokenizer_fn(p):
+            return tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
+        return tokenizer_fn
     return tokenizer
 
 
@@ -207,6 +211,19 @@ def load_pythia(model_size, checkpoint_path, dtype):
 
     return model, tokenizer
 
+def load_icml():
+    print("Loading model... ", file=sys.stderr, end='')
+    t0 = time.time()
+    model = LlamaForCausalLM.from_pretrained("swj0419/7b_iclm").to(DEVICE)
+    model = model.to(device=DEVICE)
+    print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
+    tokenizer_path = Path('/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model')
+    tokenizer = load_llama_tokenizer(
+        tokenizer_path, DEVICE, return_tokenizer_as_fn=True
+    )
+
+    return model, tokenizer
+
 
 def load_lm_head(
     checkpoint_path: str, 
@@ -236,6 +253,13 @@ def load_lm_head(
         assert(os.path.isdir(checkpoint_path))
         model = load_pythia_model(checkpoint_path, model_size, dtype)
         lm_head = model.embed_out
+        lm_head = lm_head.eval()
+        lm_head = lm_head.to(device)
+
+        del model
+    elif(model_type == "icml"):
+        model, _ = load_icml()
+        lm_head = model.lm_head
         lm_head = lm_head.eval()
         lm_head = lm_head.to(device)
 
