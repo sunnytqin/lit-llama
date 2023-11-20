@@ -1,5 +1,7 @@
 import copy
+import functools
 import json
+import logging
 import os
 import pickle
 import sys
@@ -14,17 +16,23 @@ from transformers import (
     AutoTokenizer,
 )
 
+from lit_llama import LLaMA, Tokenizer
+from lit_llama.model import pipeLLaMA, LLaMAConfig
+from lit_llama.utils import EmptyInitOnDevice, jsd
+from lit_gpt import GPT, Config, Tokenizer
 from train_head_utils import (
     load_llama,
+    load_llama_2,
     load_pythia,
     MAX_LEN,
 )
 
-
-DTYPE = torch.float32
+#DTYPE = torch.float32
+DTYPE = torch.bfloat16
 DEVICE = torch.device('cuda:0')
 SUPPORTED_MODEL_TYPES = set([
     "llama",
+    "llama_2",
     "pythia",
 ])
 
@@ -63,6 +71,7 @@ def main(
     return_initial_embeddings: bool = False,
     return_after_layer_n: Optional[int] = None,
     resume: bool = False,
+    revision: int = -1,
 ) -> None:
     """Generates text samples based on a pre-trained LLaMA model and tokenizer.
 
@@ -80,12 +89,15 @@ def main(
         return_embeddings: Whether to skip the logit head and return raw embeddings
         return_initial_embeddings: Whether to immediately return the sequence embedding
         resume: Quick and dirty resume functionality. DON'T CHANGE HYPERPARAMS.
+        revision: The version of Pythia to use
     """
     assert(model_type in SUPPORTED_MODEL_TYPES)
 
     if not checkpoint_path:
         if(model_type == "llama"):
             checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/{model_size}/lit-llama.pth'
+        elif(model_type == "llama_2"):
+            checkpoint_path = f'/n/holyscratch01/barak_lab/Everyone/lit-gpt_llama_2/Llama-2-{model_size}-hf/'
         elif(model_type == "pythia"):
             checkpoint_path = f'/n/holystore01/LABS/barak_lab/Everyone/pythia/pythia-{model_size}/'
         else:
@@ -93,7 +105,9 @@ def main(
     
     if not tokenizer_path:
         if(model_type == "llama"):
-            tokenizer_path = '/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model'
+            tokenizer_path = '/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model' 
+        elif(model_type == "llama_2"):
+            pass # Not necessary
         elif(model_type == "pythia"):
             pass # Not necessary
 
@@ -108,9 +122,14 @@ def main(
         model, tokenizer = load_llama(
             model_size, checkpoint_path, tokenizer_path, DTYPE, quantize
         )
+    elif(model_type == "llama_2"):
+        model, tokenizer, fabric = load_llama_2(
+            model_size, checkpoint_path, DTYPE, return_fabric=True
+        )
+        print("Model done!")
     elif(model_type == "pythia"):
         model, tokenizer = load_pythia(
-            model_size, checkpoint_path, DTYPE
+            model_size, checkpoint_path, DTYPE, revision=revision,
         )
     else:
         raise ValueError(f"Invalid model type: {model_type}")
@@ -141,7 +160,6 @@ def main(
     skip = False
     outputs = {}
     for i, (key, prompt) in enumerate(prompts):
-        if shard_count == 5: break
         # Write shard
         if(i != 0 and i % output_shard_size == 0):
             if(len(outputs)):
@@ -169,11 +187,13 @@ def main(
 
         if(model_type == "llama"):
             max_len = model.config.block_size
+        elif(model_type == "llama_2"):
+            max_len = model.config.block_size
         else:
             max_len = MAX_LEN
 
         if(len_prompt > max_len):
-            print(f'Truncating {key}...')
+            logging.info(f'Truncating {key}...')
             encoded_prompt = encoded_prompt[..., :max_len]
             len_prompt = max_len
 
@@ -185,6 +205,24 @@ def main(
                     fn = model._forward
                 elif(return_initial_embeddings):
                     fn = model.embed_sequence
+                elif(return_after_layer_n):
+                    raise NotImplementedError
+            elif(model_type == "llama_2"):
+                #### THIS IS NECESSARY TO KEEP FSDP ENTROPIES CORRECT ####
+                #### why is lightning the way that it is ####
+                with fabric.init_tensor():
+                    model.max_seq_length = encoded_prompt.shape[-1]
+                ##########################################################
+
+                fn = model.forward
+                if(return_embeddings):
+                    def fn(p):
+                        _, embeddings = model.forward(
+                            p, None, return_embeddings=True
+                        )
+                        return embeddings
+                elif(return_initial_embeddings):
+                    raise NotImplementedError
                 elif(return_after_layer_n):
                     raise NotImplementedError
             elif(model_type == "pythia"):

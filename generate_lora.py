@@ -17,7 +17,6 @@ lora_r = 8
 lora_alpha = 16
 lora_dropout = 0.05
 
-
 def main(
     prompt: str = "What food do lamas eat?",
     input: str = "",

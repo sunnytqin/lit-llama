@@ -51,10 +51,9 @@ ds_config = {
     "zero_optimization": {"stage": 2},
 }
 
-
 def main(
     data_dir: str = "data/alpaca", 
-    pretrained_path: str = "checkpoints/lit-llama/7B/lit-llama.pth",
+    pretrained_path: str = "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/7B/state_dict.pth",
     out_dir: str = "out/adapter/alpaca",
 ):
 
@@ -152,7 +151,7 @@ def train(
 
 
 def generate_response(model, instruction, input=""):
-    tokenizer = Tokenizer("checkpoints/lit-llama/tokenizer.model")
+    tokenizer = Tokenizer("/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/tokenizer.model")
     sample = {"instruction": instruction, "input": input}
     prompt = generate_prompt(sample)
     encoded = tokenizer.encode(prompt, bos=True, eos=False, device=model.device)

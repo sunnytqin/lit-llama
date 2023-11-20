@@ -1,19 +1,19 @@
 import logging
 import os
+import pathlib
 import pickle
 import random
 import sys
 import time
 from typing import Optional, Iterator, Tuple, Sequence
 
+import lightning
 import torch
 import torch.nn as nn
 from transformers import (
     AutoTokenizer,
     GPTNeoXForCausalLM,
-    LlamaForCausalLM,
 )
-from pathlib import Path
 
 from lit_llama import LLaMA, Tokenizer, pipeLLaMA
 from lit_llama.utils import EmptyInitOnDevice, jsd
@@ -24,6 +24,7 @@ DEVICE = torch.device("cuda:0")
 
 VOCAB_SIZES = {
     "llama": None,
+    "llama_2": None,
     "pythia": 50254,
 }
 
@@ -91,7 +92,6 @@ class PrecomputedShardLoader:
         """
         cur_shard_id = 0
         while cur_shard_id < len(self.shards):
-            t = time.time()
             # Load corresponding shards
             t = time.time()
             logging.info(f"Loading shards...")
@@ -111,14 +111,17 @@ class PrecomputedShardLoader:
                 # Filter out examples that don't pass the filter
                 for i in range(len(loaded_shards)):
                     shard = loaded_shards[i]
+                    y = 0
                     for j in range(len(shard)):
                         k, v = shard[j]
-
+                        
+                        # Skip empty articles
                         if(len(v.shape) == 1):
-                            v = v.unsqueeze(0)
+                            continue
 
+                        v = v[:MAX_LEN]
                         shard[j] = (k, v[self.filter[k].bool()])
-            
+
             yield from zip(*loaded_shards)
 
             cur_shard_id += 1
@@ -164,10 +167,80 @@ def load_llama(model_size, checkpoint_path, tokenizer_path, dtype, quantize, ret
     return model, tokenizer
 
 
-def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype):
-    revisions = os.listdir(checkpoint_path)
+def load_llama_2_tokenizer(tokenizer_path, device, return_tokenizer_as_fn=True):
+    if(type(tokenizer_path) == str):
+        tokenizer_path = pathlib.Path(tokenizer_path) 
+    
+    tokenizer = lit_gpt.Tokenizer(tokenizer_path)
+    if(return_tokenizer_as_fn):
+        return lambda p: tokenizer.encode(p, device=device)
+
+    return tokenizer
+
+
+def load_llama_2(model_size, checkpoint_dir, dtype, return_tokenizer_as_fn=True, return_fabric=False):
+    assert(os.path.isdir(checkpoint_dir))
+
+    checkpoint_dir = pathlib.Path(checkpoint_dir)
+
+    if(dtype == torch.float):
+        precision = "32"
+    elif(dtype == torch.bfloat16):
+        precision = "bf16-true"
+    else:
+        raise ValueError
+
+    print("Loading model... ", file=sys.stderr, end='')
+    t0 = time.time()
+
+    strategy = lightning.fabric.strategies.FSDPStrategy(
+        auto_wrap_policy={Block}, cpu_offload=False
+    )
+    fabric = lightning.Fabric(
+        devices=torch.cuda.device_count(), 
+        precision=precision, 
+        strategy=strategy,
+    )
+    fabric.launch()
+   
+    check_valid_checkpoint_dir(checkpoint_dir)
+    config = lit_gpt.Config.from_json(
+        checkpoint_dir / "lit_config.json"
+    )
+
+    with fabric.init_module(empty_init=True), quantization(None):
+        model = lit_gpt.GPT(config)
+   
+    model.eval()
+    model = fabric.setup_module(model)
+
+    checkpoint_path = checkpoint_dir / "lit_model.pth"
+    load_checkpoint(fabric, model, checkpoint_path, strict=True)
+
+    print("Model loaded...", file=sys.stderr)
+
+    tokenizer = load_llama_2_tokenizer(
+        checkpoint_dir,
+        device=fabric.device,
+        return_tokenizer_as_fn=return_tokenizer_as_fn,
+    )
+
+    if(return_fabric):
+        return model, tokenizer, fabric
+
+    return model, tokenizer
+
+
+def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype, revision: int = -1):
     # Revisions are of the format step{number}
-    revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
+    if(revision == -1):
+        revisions = os.listdir(checkpoint_path)
+        print(revisions)
+        revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
+    else:
+        revision = f"step{revision}"
+
+    print(revision)
     cache_dir = os.path.join(checkpoint_path, revision)
     print("Pythia revision:", revision, "cache_dir:", cache_dir)
 
@@ -196,14 +269,18 @@ def load_pythia_tokenizer(model_size, device):
     return tokenizer_fn
 
 
-def load_pythia(model_size, checkpoint_path, dtype):
-    print(checkpoint_path)
+def load_pythia(model_size, checkpoint_path, dtype, revision=-1):
     assert(os.path.isdir(checkpoint_path))
 
     print("Loading model... ", file=sys.stderr, end='')
     t0 = time.time()
 
-    model = load_pythia_model(checkpoint_path, model_size, dtype)
+    model = load_pythia_model(
+        checkpoint_path, 
+        model_size, 
+        dtype, 
+        revision=revision
+    )
     model = model.to(device=DEVICE)
     print(f"Time: {time.time() - t0:.02f} seconds.", file=sys.stderr)
 
@@ -231,6 +308,7 @@ def load_lm_head(
     device: str, 
     model_type: str,
     model_size: str,
+    revision: int = -1,
 ):
     logging.info(f"Loading model at {checkpoint_path}... ")
     t = time.time()
@@ -249,9 +327,24 @@ def load_lm_head(
             lm_head = lm_head.to(device)
 
         del checkpoint
+    elif(model_type == "llama_2"):
+        assert(os.path.isdir(checkpoint_path))
+        checkpoint = torch.load(f"{checkpoint_path}/lit_model.pth")
+        assert(len([k for k in checkpoint.keys() if "lm_head" in k]) == 1)
+        lm_head_weights = checkpoint["lm_head.weight"]
+        vocab_size, emb_dim = lm_head_weights.shape
+        lm_head = nn.Linear(
+            emb_dim, vocab_size, bias=False
+        )
+        with torch.no_grad():
+            lm_head.weight.data = lm_head_weights.to(dtype)
+            lm_head.eval()
+            lm_head = lm_head.to(device)
+
+        del checkpoint
     elif(model_type == "pythia"):
         assert(os.path.isdir(checkpoint_path))
-        model = load_pythia_model(checkpoint_path, model_size, dtype)
+        model = load_pythia_model(checkpoint_path, model_size, dtype, revision=revision)
         lm_head = model.embed_out
         lm_head = lm_head.eval()
         lm_head = lm_head.to(device)
@@ -441,7 +534,7 @@ def _preprocessor(
         assert(len(keys) == 1)
 
         # Some empty articles slipped through my filter. Sad!
-        if(small_emb.shape[0] <= 1):
+        if(small_emb.shape[0] == 0):
             continue
 
         small_emb = small_emb.to(device=device, dtype=dtype)
@@ -519,12 +612,13 @@ def _preprocessor(
                     no_bins, 
                     mi=min_bin, 
                     ma=max_bin,
-                ).squeeze(0)
+                )
 
         inputs_filtered = [emb for f, emb in zip(filt, input_emb) if f]
         if(len(inputs_filtered) == 0):
             continue
         input_emb = torch.stack(inputs_filtered)
+
         targets_filtered = [tar for f, tar in zip(filt, target) if f]
         target = torch.stack(targets_filtered)
 
