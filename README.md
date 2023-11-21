@@ -49,3 +49,5 @@ python generate.py --model_size 7B
 This will run the 7B model. See source code for a couple more options for generation. 
 
 On GPUs with `bfloat16` support, the `generate.py` script will automatically convert the weights and consume about ~14 GB.
+
+To run the 30B model, please request 2 GPUs to avoid OOM, and 3 for 65B. 
