@@ -356,6 +356,42 @@ def load_lm_head(
     return lm_head
 
 
+def load_embedding_layer(
+    checkpoint_path: str, 
+    dtype: torch.dtype, 
+    device: str, 
+    model_type: str,
+    model_size: str,
+    revision: int = -1,
+):
+    logging.info(f"Loading model at {checkpoint_path}... ")
+    t = time.time()
+    if(model_type == "llama"): 
+        assert(os.path.isfile(checkpoint_path))
+        checkpoint = torch.load(checkpoint_path)
+        embed_layer_weights = checkpoint["transformer.wte.weight"]
+        vocab_size, emb_dim = embed_layer_weights.shape
+        emb_layer = nn.Embedding(
+            vocab_size, emb_dim,
+        )
+        with torch.no_grad():
+            emb_layer.weight.data = embed_layer_weights.to(dtype)
+            emb_layer.eval()
+            emb_layer = emb_layer.to(device)
+
+        del checkpoint
+    elif(model_type == "llama_2"):
+        raise NotImplementedError
+    elif(model_type == "pythia"):
+        raise NotImplementedError
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
+
+    logging.info(f"Time: {time.time() - t:.02f} seconds.")
+
+    return emb_layer
+
+
 class DistancePredictionHeadWithLMHead(nn.Module):
     def __init__(self,
         lm_head: nn.Linear,
@@ -504,6 +540,8 @@ def _preprocessor(
     dtype: torch.dtype,
     target_fn_name="log_jsd",
     bin_target: bool = True,
+    append_predicted_token_embedding=False,
+    small_embedding_layer=None,
     _stash=None,
 ):
     _stash_contents = {}
@@ -593,6 +631,9 @@ def _preprocessor(
                 target = small_entropy
             elif(target_fn_name == "large_entropy"):
                 target = large_entropy
+            elif(target_fn_name == "log_large_entropy"):
+                clamped_large_entropy = torch.clamp(large_entropy, min=5e-2, max=10)
+                target = torch.log(clamped_large_entropy)
             else:
                 raise ValueError("Invalid target name")
 
@@ -605,18 +646,31 @@ def _preprocessor(
                     ma=max_bin,
                 )
 
-        inputs_filtered = [emb for f, emb in zip(filt, input_emb) if f]
-        if(len(inputs_filtered) == 0):
-            continue
-        input_emb = torch.stack(inputs_filtered)
+        def apply_filter(tensor, filter_tensor):
+            filtered = [t for f, t in zip(filter_tensor, tensor) if f]
+            return torch.stack(filtered) if len(filtered) else tensor[:0]
 
-        targets_filtered = [tar for f, tar in zip(filt, target) if f]
-        target = torch.stack(targets_filtered)
+        input_emb = apply_filter(input_emb, filt)
+        if(input_emb.shape[0] == 0):
+            continue
+
+        target = apply_filter(target, filt)
 
         if(provide_entropy_as_input):
-            entropy_filtered = [ent for f, ent in zip(filt, small_entropy) if f]
-            entropy_filtered = torch.stack(entropy_filtered)
+            entropy_filtered = apply_filter(small_entropy, filt)
             input_emb = torch.cat([input_emb, entropy_filtered.unsqueeze(-1)], dim=-1)
+
+        if(append_predicted_token_embedding):
+            small_logits_softmax_filtered = apply_filter(small_logits_softmax, filt)
+            small_top_1_token = torch.argmax(small_logits_softmax_filtered, dim=-1)
+            small_top_1_token_emb = small_embedding_layer(small_top_1_token).detach() # for some reason .eval() isn't sufficient for these
+            input_emb = torch.cat(
+                [
+                    input_emb,
+                    small_top_1_token_emb,
+                ],
+                dim=-1,
+            )
 
         yield (input_emb, target)
 
