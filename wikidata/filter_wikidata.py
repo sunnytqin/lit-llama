@@ -1,6 +1,8 @@
 import json
-from templates import TEMPLATES
+from wikidata.templates import TEMPLATES
+import os
 
+PATH_PREFIX = "/n/holyscratch01/barak_lab/Lab/sqin/hallucination/wikidata/"
 data_pairs_path = "data_plaintext.json"
 COLLISION_THRESHOLD = 5
 
@@ -29,5 +31,6 @@ for wikidata_category, pairs in d.items():
 
     new[wikidata_category] = filtered
 
-with open("filtered_data_plaintext.json", "w") as fp:
+filter_data_path = os.path.join(PATH_PREFIX, "filtered_data_plaintext.json")
+with open(filter_data_path, "w") as fp:
     json.dump(new, fp)

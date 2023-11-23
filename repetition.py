@@ -27,12 +27,9 @@ DEVICE= "cuda"
 # DTYPE = torch.bfloat16 if torchs.cuda.is_bf16_supported() else torch.float32
 DTYPE = torch.float32
 
-def log(file, *content, **kwargs):
-    if file is not None:
-        with open(file, "a") as f: print(content, **kwargs, file=file)
-    # else: 
-    #     print(*content, **kwargs)
-
+def log(verbose, *content, **kwargs):
+    if verbose:
+        print(*content, **kwargs)
 
 def pythia_forward(model, embeddings=False, return_after_layer_n=-1):
     def fw(input_ids):
@@ -171,14 +168,6 @@ def main(
 
     print(f"{len(prompt_type)} encoded prompts , w/ {prompt_type.sum()} low_e_high_a examples.", file=sys.stderr) 
 
-    # plt.figure()
-    # plt.hist(np.array(small_entropy_all).flatten()[prompt_type.detach().cpu().bool().numpy()], bins=30, histtype="step", label="Small Model Original Entropy")
-    # plt.hist(np.array(small_entropy_all).flatten()[~prompt_type.detach().cpu().bool().numpy()], bins=30, histtype="step", label="Large Model Original Entropy")
-    # plt.xlabel("Original Entropy")
-    # plt.ylabel("Count")
-    # plt.legend()
-    # plt.savefig(f"Original_entropy.png")
-
     if experiment_name is not None:
         save_dir = os.path.join(repetition_filter, experiment_name)
         os.makedirs(save_dir, exist_ok=True)
@@ -235,11 +224,11 @@ def main(
 def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, tokenizer, k, 
                           sample_until_period=True,
                           addl_token_limit=100,
-                          example_path=None, 
+                          verbose=False, 
                           ):
     
     len_prompt = encoded_prompt.shape[-1]
-    log(example_path, f"\nPrompt: \n {tokenizer.decode(encoded_prompt[0])}")
+    log(verbose, f"\nPrompt: \n {tokenizer.decode(encoded_prompt[0])}", end=" ")
     # Run the model
     if model_type == "llama":
         with torch.no_grad():
@@ -251,20 +240,19 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
             generated = small_lm_head(orig_embed)
 
     entropy = compute_entropy(generated[0, -1, :])
-    if entropy < 2.0 or entropy > 3.0:
-        print("entropy: ", generated.shape, entropy)
+    log(verbose, f"(orinal entropy: {entropy:.3f})")   
     generated = torch.softmax(generated, dim=-1).detach().cpu()
 
     orig_embed = orig_embed[0, -1, :].detach().cpu()        
 
     # Top k tokens
-    log(example_path, "\nTop K Token: \n")
+    log(verbose, "\nTop K Token: \n")
     top_k = torch.topk(generated, k, dim=-1).indices[0, -1, :].to(DEVICE)
 
     for t in torch.unbind(top_k):
-        log(example_path, f"{tokenizer.decode(t)}: {generated[0, -1, t]:.3f}", end=" ")
+        log(verbose, f"{tokenizer.decode(t)}: {generated[0, -1, t]:.3f}", end=" ")
 
-    log(example_path, "\n \nTop K Repetition: \n")
+    log(verbose, "\n \nTop K Repetition: \n")
 
     # A surprise tool that will help us later
     # (a lone period produces a different token ID for some idiotic reason)
@@ -312,7 +300,7 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
                 if(addl_tokens >= addl_token_limit):
                     break
 
-        log(example_path, "[prompt]", tokenizer.decode(prompt_with_candidate[0, len_prompt:]), end="<EOS> [prompt]")
+        log(verbose, "[prompt]", tokenizer.decode(prompt_with_candidate[0, len_prompt:]), end="<EOS> [prompt]")
 
         if model_type == 'pythia':
             repetition_prompt = torch.cat(
@@ -329,7 +317,7 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
             repetition_prompt = torch.cat(
                     [
                         prompt_with_candidate,
-                        # torch.tensor(tokenizer.eos_id, device=DEVICE)[None, None],
+                        torch.tensor(tokenizer.eos_id, device=DEVICE)[None, None],
                         encoded_prompt,
                     ],
                     dim=-1
@@ -341,13 +329,15 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
                 repetition_embeds.append(repetition_embed)
                 if True:
                     repetition_logits = model.lm_head(repetition_embed.to(DEVICE))[0, :].detach()
+                    entropy = compute_entropy(repetition_logits)
                     repetition_logits = torch.softmax(repetition_logits, dim=-1)
                     repetition_top_k = torch.topk(repetition_logits, k, dim=-1).indices
                     decoded = [tokenizer.decode(rt) for rt in torch.unbind(repetition_top_k)]
                     prob = [float(repetition_logits[rt]) for rt in repetition_top_k]
                     for d, p in zip(decoded, prob):
-                        log(example_path, f"{d}: {p:.3f}", end=" ")
-                    log(example_path, "\n")    
+                        log(verbose, f"{d}: {p:.3f}", end=" ")
+                    log(verbose, f"(new entropy: {entropy:.3f})") 
+                    log(verbose, "\n")    
         elif model_type == "pythia":
             with torch.no_grad():
                 repetition_embed = pythia_forward(model, embeddings=True)(repetition_prompt)[:, -1, :].detach().cpu()
@@ -359,8 +349,8 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
                     decoded = [tokenizer.decode(rt) for rt in torch.unbind(repetition_top_k)]
                     prob = [float(repetition_logits[rt]) for rt in repetition_top_k]
                     for d, p in zip(decoded, prob):
-                        log(example_path, f"{d}: {p:.5f}", end=" ")
-                    log(example_path, "\n")    
+                        log(verbose, f"{d}: {p:.5f}", end=" ")
+                    log(verbose, "\n")    
 
     return orig_embed, torch.concatenate(repetition_embeds)[None, :]
 

@@ -39,13 +39,26 @@ You are all set! 🎉
 
 ## Use the model
 
-To generate text predictions with the repetition model,
+To generate text predictions with the repetition model, 
 
 
 ```bash
-python generate.py --model_size 7B
+python generate.py --repetition=True --model_size 7B
 ```
 
 This will run the 7B model. See source code for a couple more options for generation. 
 
 On GPUs with `bfloat16` support, the `generate.py` script will automatically convert the weights and consume about ~14 GB.
+
+To run the 30B model, please request 2 GPUs to avoid OOM, and 3 for 65B. 
+
+
+To generate text predictions for direct comparison between models, 
+
+```bash
+python generate.py --repetition=False --large_model_size=30B
+```
+
+This will run the 7B model and 30B model. See source code for a couple more options for generation. 
+
+Please request 3 GPUs for [7B, 30B] and 4 for [7B, 65B] . 

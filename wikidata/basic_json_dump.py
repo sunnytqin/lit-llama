@@ -24,7 +24,7 @@ def has_occupation_politician(item: WikidataItem, truthy: bool = True) -> bool:
 
 
 # create an instance of WikidataJsonDump
-wjd_dump_path = "wikidata.json"
+wjd_dump_path = "/n/holyscratch01/barak_lab/Lab/sqin/hallucination/wikidata/wikidata-20231009-all.json.bz2"
 wjd = WikidataJsonDump(wjd_dump_path)
 
 # create an iterable of WikidataItem representing politicians
@@ -34,6 +34,10 @@ for ii, entity_dict in enumerate(wjd):
 
     if entity_dict["type"] == "item":
         entity = WikidataItem(entity_dict)
+        print(entity)
+        print(entity.entity_id, entity.get_label())
+        print(entity.get_truthy_claim_group("P35"))
+        quit()
         if has_occupation_politician(entity):
             politicians.append(entity)
 

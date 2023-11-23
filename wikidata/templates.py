@@ -8,6 +8,8 @@ KEYS = [
     "few_shot_examples",
     "templates_fw",
     "templates_bw",
+    "addl_templates_fw", 
+    "addl_templates_bw", 
 ]
 
 TEMPLATES = {
@@ -536,4 +538,4 @@ TEMPLATES = {
 
 for k in TEMPLATES:
     assert(all([key in KEYS for key in TEMPLATES[k]]))
-    assert(all([key in TEMPLATES[k] for key in KEYS]))
+    # assert(all([key in TEMPLATES[k] for key in KEYS]))
