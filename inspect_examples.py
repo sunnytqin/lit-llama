@@ -155,28 +155,28 @@ for i, shard_tups in enumerate(val_logit_loader):
     se_correct += torch.sum(small_entropy[predictions == targets]).item()
     se_incorrect += torch.sum(small_entropy[predictions != targets]).item()
 
-    # # Load the surrounding data
-    # text = raw_data[small_key]
-    # tokens = tokenizer(text, return_tensors="pt")["input_ids"][0]
-    # tokens = tokens[:MAX_LENGTH]
+    # Load the surrounding data
+    text = raw_data[small_key]
+    tokens = tokenizer(text, return_tensors="pt")["input_ids"][0]
+    tokens = tokens[:MAX_LENGTH]
 
-    # # Load the filter
-    # filt = filter[small_key]
+    # Load the filter
+    filt = filter[small_key]
 
-    # assert(filt.shape == tokens.shape)
-    # assert(torch.sum(filt) == small_emb.shape[0])
+    assert(filt.shape == tokens.shape)
+    assert(torch.sum(filt) == small_emb.shape[0])
 
-    # prediction_index = 0
-    # tokens_for_inspection = []
-    # for i, t in enumerate(tokens):
-    #     tokens_for_inspection.append(tokenizer.decode(t))
-    #     if(filt[i]):
-    #         tokens_for_inspection.append(f"[{predictions[prediction_index]}, {targets[prediction_index]}]")
-    #         prediction_index += 1
+    prediction_index = 0
+    tokens_for_inspection = []
+    for i, t in enumerate(tokens):
+        tokens_for_inspection.append(tokenizer.decode(t))
+        if(filt[i]):
+            tokens_for_inspection.append(f"[{predictions[prediction_index]}, {targets[prediction_index]}]")
+            prediction_index += 1
 
-    # print(f"{torch.sum(filt)} predictions...")
-    # print("".join(tokens_for_inspection))
-    # input("Press Enter to continue...")
+    print(f"{torch.sum(filt)} predictions...")
+    print("".join(tokens_for_inspection))
+    input("Press Enter to continue...")
 
 print(f"Accuracy: {count_correct / count}")
 print(f"Fake accuracy: {count_fake_correct / count}")
