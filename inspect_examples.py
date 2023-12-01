@@ -19,7 +19,7 @@ DEVICE = torch.device("cuda:0")
 DTYPE = torch.float32
 MAX_LENGTH = 2048
 
-classifier_checkpoint = "outputs/pythia-1.4b_pythia-12b_separated_classes_pile_code_eval//state_dict.pth"
+classifier_checkpoint = "/n/holyscratch01/barak_lab/Lab/gahdritz/trained_heads/pythia-1.4b_pythia-12b_separated_classes_pile_code_eval//state_dict.pth"
 model_type = "pythia"
 small_model_size = "1.4b"
 large_model_size = "12b"
@@ -28,10 +28,10 @@ min_bin = 0
 max_bin = 1
 small_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/pythia_redownload/pythia-{small_model_size}"
 large_checkpoint_path = f"/n/holystore01/LABS/barak_lab/Everyone/pythia_redownload/pythia-{large_model_size}"
-precomputed_small_emb_dir_val = f"data/pile/logits/pythia-{small_model_size}_val_val_code"
-precomputed_large_emb_dir_val = f"data/pile/logits/pythia-{large_model_size}_val_val_code"
-val_dataset_filter_path = f"dataset_filters/pile_pythia-{small_model_size}_pythia-{large_model_size}_val_val_code_3_max/filter.pickle"
-raw_data_json = f"data/pile/pile_val_val.json"
+precomputed_small_emb_dir_val = f"/n/holyscratch01/barak_lab/Lab/gahdritz/pile/logits/pythia-{small_model_size}_val_val_code"
+precomputed_large_emb_dir_val = f"/n/holyscratch01/barak_lab/Lab/gahdritz/pile/logits/pythia-{large_model_size}_val_val_code"
+val_dataset_filter_path = f"/n/holyscratch01/barak_lab/Lab/gahdritz/dataset_filters/pile_pythia-{small_model_size}_pythia-{large_model_size}_val_val_code_3_max/filter.pickle"
+raw_data_json = f"/n/holyscratch01/barak_lab/Lab/gahdritz/pile/pile_val_val.json"
 
 tokenizer = AutoTokenizer.from_pretrained(
     f"EleutherAI/pythia-{small_model_size}",
