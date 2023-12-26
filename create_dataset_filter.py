@@ -62,6 +62,7 @@ def main(
     zero_entropy_threshold: float = 0.2,
     balanced_classes: bool = True,
     shard_output: bool = False,
+    save_zeros: bool = False,
     small_model_revision: int = -1,
     shard_size: int = 200, 
     seed: int = 42,
@@ -77,6 +78,7 @@ def main(
         entropy_max: The upper bound of the entropy range (or -1).
         zero_entropy_threshold: The threshold at which the large model entropy is considered zero.
         balanced_classes: Whether to balance the classes by subsampling the larger class.
+        save_zeros: Whether to include only instances in the "0" class
     """
     # MUST COME FIRST
     args = locals()
@@ -418,35 +420,9 @@ def main(
 
         print(f"New sizes: {new_sizes}")
         
-    # Not balance the classes
+    # Don't balance the classes
     else:
-        sizes = {
-            "0": sum([torch.sum(v) for v in by_label["0"].values()]),
-            "1": sum([torch.sum(v) for v in by_label["1"].values()]),
-         }
-        print(f"Initial sizes: {sizes}")
-        
-        max_class = max(sizes, key=sizes.get)
-        min_class = min(sizes, key=sizes.get)
-
-        fraction = sizes[min_class] / sizes[max_class]
-
-        for key, f in by_label[max_class].items():
-            subsample_mask = torch.rand(f.shape, device=f.device) <= fraction
-            filtered = torch.logical_and(f, subsample_mask)
-            filt[key] = torch.logical_or(
-                by_label[min_class][key],
-                filtered,
-            )
-
-            by_label[max_class][key] = filtered
-
-        new_sizes = {
-            "0": sum([torch.sum(v) for v in by_label["0"].values()]),
-            "1": sum([torch.sum(v) for v in by_label["1"].values()]),
-        }
-
-        print(f"New sizes: {new_sizes}")
+        pass
 
     if(shard_output):
         # split into smaller shards for repetition experiment
@@ -498,9 +474,16 @@ def main(
             k: v.to(device="cpu") for k,v in filt.items()
         }
 
+        if(save_zeros):
+            filt = by_label["0"]
+
         output_path = os.path.join(output_dir, "filter.pickle")
         with open(output_path, "wb") as fp:
             pickle.dump(filt, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # Save the command line arguments
+    with open(f"{output_dir}/args.json", "w") as fp:
+        json.dump(args, fp)
 
 
 if __name__ == "__main__":
