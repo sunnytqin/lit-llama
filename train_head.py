@@ -21,6 +21,7 @@ from train_head_utils import (
     DistancePredictionHead,
     DistancePredictionHeadWithLMHead,
     entropy_threshold_acc,
+    load_embedding_layer,
     load_lm_head,
     PrecomputedShardLoader,
     _preprocessor,
@@ -50,7 +51,9 @@ wandb_metrics = set([
     ("train_accuracy", "step"),
     ("val_loss", "step"),
     ("val_accuracy", "step"),
+    ("val_set_size", "step"),
     ("val_entropy_threshold_acc", "step"),
+    ("val_small_entropy_loss", "step"),
 ])
 
 
@@ -71,6 +74,10 @@ def _wandb_setup(args):
     slurm_jobid = os.environ["SLURM_JOBID"]
     if(slurm_jobid):
         wandb_config["slurm_jobid"] = slurm_jobid
+
+    slurm_nodename = os.environ["SLURMD_NODENAME"]
+    if(slurm_nodename):
+        wandb_config["slurm_nodename"] = slurm_nodename
 
     wandb_run = wandb.init(
         config=wandb_config,
@@ -143,6 +150,7 @@ def main(
     min_entropy: float = None,
     max_entropy: float = None,
     provide_entropy_as_input: bool = False,
+    append_predicted_token_embedding: bool = False,
     precomputed_small_emb_dir_val: str = None,
     precomputed_large_emb_dir_val: str = None,
     precomputed_head_input_emb_dir_val: str = None,
@@ -240,6 +248,18 @@ def main(
     small_lm_head = load_lm_head(small_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=small_model_size, revision=small_model_revision)
     large_lm_head = load_lm_head(large_checkpoint_path, dtype=DTYPE, device=DEVICE, model_type=model_type, model_size=large_model_size)
 
+    small_embedding_layer = None
+    if(append_predicted_token_embedding):
+        # Yes you could load this at the same time as the LM head above but who cares
+        small_embedding_layer = load_embedding_layer(
+            small_checkpoint_path, 
+            dtype=DTYPE, 
+            device=DEVICE, 
+            model_type=model_type, 
+            model_size=small_model_size, 
+            revision=small_model_revision,
+        )
+
     # Load the precomputed logits
     shard_dirs = [
         precomputed_small_emb_dir,
@@ -294,12 +314,16 @@ def main(
         if(provide_entropy_as_input):
             input_dim += 1
 
+        if(append_predicted_token_embedding):
+            input_dim += small_embedding_layer.weight.shape[1]
+
         distance_prediction_head = DistancePredictionHead(
             input_dim=input_dim,
             **shared_head_params,
         )
     else:
         assert(not provide_entropy_as_input)
+        assert(not append_predicted_token_embedding)
         distance_prediction_head = DistancePredictionHeadWithLMHead(
             lm_head=small_lm_head,
             **shared_head_params,
@@ -355,6 +379,8 @@ def main(
             softmax_input_logits=softmax_input_logits,
             target_fn_name=target_fn_name,
             bin_target=bin_target,
+            append_predicted_token_embedding=append_predicted_token_embedding,
+            small_embedding_layer=small_embedding_layer,
             device=DEVICE,
             dtype=DTYPE,
         )
@@ -366,6 +392,7 @@ def main(
             nonzero_bin_weight=nonzero_bin_weight,
         )
 
+        best_val_loss = float("inf")
         for i, (inputs, targets) in enumerate(bl):
             # Dry run w/ grad enabled for the torch compiler (idk why this is necessary)
             if(i == 0 and epoch == 0):
@@ -389,6 +416,8 @@ def main(
                     softmax_input_logits=softmax_input_logits,
                     target_fn_name=target_fn_name,
                     bin_target=bin_target,
+                    append_predicted_token_embedding=append_predicted_token_embedding,
+                    small_embedding_layer=small_embedding_layer,
                     device=DEVICE,
                     dtype=DTYPE,
                     _stash=val_stash, # used to smuggle out the entropy
@@ -432,11 +461,24 @@ def main(
                         all_val_gt.extend(val_targets.cpu().tolist())
 
                     # Compute the accuracy of the simplest entropy threshold
-                    small_entropy_threshold_acc = entropy_threshold_acc(val_stash["small_entropy"], all_val_gt)
+                    entropy_threshold_dict = {}
+                    if(bin_target and target_fn_name == "large_entropy"):
+                        entropy_threshold_dict["val_entropy_threshold_acc"] = (
+                            entropy_threshold_acc(val_stash["small_entropy"], all_val_gt)
+                        )
+                    elif(target_fn_name == "large_entropy"):
+                        entropy_threshold_dict["val_small_entropy_loss"] = (
+                            loss_fn(
+                                torch.tensor(val_stash["small_entropy"]).to(DTYPE),
+                                torch.tensor(all_val_gt).to(DTYPE),
+                            ).item()
+                        )
 
+                    mean_val_loss = val_loss_sum / val_batch_count
                     val_metrics = {
-                        "val_loss": val_loss_sum / val_batch_count,
-                        "val_entropy_threshold_acc": small_entropy_threshold_acc,
+                        "val_loss": mean_val_loss,
+                        "val_set_size": len(all_val_gt),
+                        **entropy_threshold_dict,
                     }
 
                     print(f"Validation metric val_loss: {val_metrics['val_loss']}")
@@ -474,6 +516,12 @@ def main(
                     if(use_wandb):
                         _wandb_log(metrics=val_metrics, step_metric="step", step=cum_step)
 
+                    # Save the model
+                    if(mean_val_loss < best_val_loss):
+                        model_path = os.path.join(output_dir, "state_dict.pth")
+                        torch.save(distance_prediction_head.state_dict(), model_path)
+                        best_val_loss = mean_val_loss
+
                     distance_prediction_head.train()
 
             inputs = inputs.to(device=DEVICE, dtype=DTYPE)
@@ -508,10 +556,6 @@ def main(
                     print(f"Epoch {epoch}, batch {i}, accuracy: {accuracy.item():.02f}", file=sys.stderr)
 
             cum_step += 1
-
-    # Save the model
-    model_path = os.path.join(output_dir, "state_dict.pth")
-    torch.save(distance_prediction_head.state_dict(), model_path)
 
 
 if __name__ == "__main__":

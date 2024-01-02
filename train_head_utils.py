@@ -15,6 +15,7 @@ from transformers import (
     GPTNeoXForCausalLM,
 )
 
+import lit_gpt
 from lit_llama import LLaMA, Tokenizer, pipeLLaMA
 from lit_llama.utils import EmptyInitOnDevice, jsd
 
@@ -74,8 +75,11 @@ class PrecomputedShardLoader:
         shards = []
         for shard_dir, shard_name in zip(self.shard_dirs, self.shards[shard_id]):
             shard_path = os.path.join(shard_dir, shard_name)
+            t = time.time()
+            print(f"Loading shard {shard_path}...")
             with open(shard_path, "rb") as fp:
                 shard = pickle.load(fp)
+            print(f"Loading done ({time.time() - t}s)...")
             shards.append(shard)
 
         return shards
@@ -133,7 +137,7 @@ def load_llama_tokenizer(tokenizer_path, device, return_tokenizer_as_fn=True):
     tokenizer = Tokenizer(tokenizer_path)
     if(return_tokenizer_as_fn):
         def tokenizer_fn(p):
-            return tokenizer.encode(p, bos=True, eos=False, device=DEVICE)
+            return tokenizer.encode(p, bos=True, eos=False, device=device)
         return tokenizer_fn
     return tokenizer
 
@@ -194,7 +198,7 @@ def load_llama_2(model_size, checkpoint_dir, dtype, return_tokenizer_as_fn=True,
     t0 = time.time()
 
     strategy = lightning.fabric.strategies.FSDPStrategy(
-        auto_wrap_policy={Block}, cpu_offload=False
+        auto_wrap_policy={lit_gpt.model.Block}, cpu_offload=False
     )
     fabric = lightning.Fabric(
         devices=torch.cuda.device_count(), 
@@ -203,19 +207,19 @@ def load_llama_2(model_size, checkpoint_dir, dtype, return_tokenizer_as_fn=True,
     )
     fabric.launch()
    
-    check_valid_checkpoint_dir(checkpoint_dir)
+    lit_gpt.utils.check_valid_checkpoint_dir(checkpoint_dir)
     config = lit_gpt.Config.from_json(
         checkpoint_dir / "lit_config.json"
     )
 
-    with fabric.init_module(empty_init=True), quantization(None):
+    with fabric.init_module(empty_init=True), lit_gpt.utils.quantization(None):
         model = lit_gpt.GPT(config)
    
     model.eval()
     model = fabric.setup_module(model)
 
     checkpoint_path = checkpoint_dir / "lit_model.pth"
-    load_checkpoint(fabric, model, checkpoint_path, strict=True)
+    lit_gpt.utils.load_checkpoint(fabric, model, checkpoint_path, strict=True)
 
     print("Model loaded...", file=sys.stderr)
 
@@ -235,12 +239,10 @@ def load_pythia_model(checkpoint_path: str, model_size: str, dtype: torch.dtype,
     # Revisions are of the format step{number}
     if(revision == -1):
         revisions = os.listdir(checkpoint_path)
-        print(revisions)
         revision = list(sorted(revisions, key=lambda r: int(r.split('step')[-1])))[-1]
     else:
         revision = f"step{revision}"
 
-    print(revision)
     cache_dir = os.path.join(checkpoint_path, revision)
     print("Pythia revision:", revision, "cache_dir:", cache_dir)
 
@@ -614,11 +616,22 @@ def _preprocessor(
             else:
                 filt = torch.ones_like(small_entropy)
 
+            # FILTER DONE #
+            ###############
+
             def _unpack(tensor):
                 return [t.item() for t in tensor.cpu().unbind()]
+            
+            def apply_filter(tensor, filter_tensor):
+                filtered = [t for f, t in zip(filter_tensor, tensor) if f]
+                return torch.stack(filtered) if len(filtered) else tensor[:0]
 
-            _stash_contents.setdefault("small_entropy", []).extend(_unpack(small_entropy))
-            _stash_contents.setdefault("large_entropy", []).extend(_unpack(large_entropy))
+            _stash_contents.setdefault("small_entropy", []).extend(
+                _unpack(apply_filter(small_entropy, filt))
+            )
+            _stash_contents.setdefault("large_entropy", []).extend(
+                _unpack(apply_filter(large_entropy, filt))
+            )
 
             # Compute the target
             if(target_fn_name == "log_jsd"):
@@ -630,12 +643,16 @@ def _preprocessor(
                 # We will predict the log of the divergence
                 target = torch.log(divergence)
 
-                _stash_contents.setdefault("divergence", []).extend(_unpack(divergence))
+                _stash_contents.setdefault("divergence", []).extend(
+                    _unpack(apply_filter(divergence, filt))
+                )
             elif(target_fn_name == "jsd"):
                 divergence = jsd(small_logits, large_logits)
                 target = divergence
 
-                _stash_contents.setdefault("divergence", []).extend(_unpack(divergence))
+                _stash_contents.setdefault("divergence", []).extend(
+                    _unpack(apply_filter(divergence, filt))
+                )
             elif(target_fn_name == "small_entropy"):
                 target = small_entropy
             elif(target_fn_name == "large_entropy"):
@@ -643,6 +660,10 @@ def _preprocessor(
             elif(target_fn_name == "log_large_entropy"):
                 clamped_large_entropy = torch.clamp(large_entropy, min=5e-2, max=10)
                 target = torch.log(clamped_large_entropy)
+            elif(target_fn_name == "large_logits"):
+                target = large_logits_softmax
+                if(vocab_size):
+                    target = target[..., :vocab_size]
             else:
                 raise ValueError("Invalid target name")
 
@@ -654,10 +675,6 @@ def _preprocessor(
                     mi=min_bin, 
                     ma=max_bin,
                 )
-
-        def apply_filter(tensor, filter_tensor):
-            filtered = [t for f, t in zip(filter_tensor, tensor) if f]
-            return torch.stack(filtered) if len(filtered) else tensor[:0]
 
         input_emb = apply_filter(input_emb, filt)
         if(input_emb.shape[0] == 0):
@@ -708,18 +725,22 @@ def batch_loader(
         inputs = torch.unbind(small_emb, dim=-2)
 
         # [N]
-        assert(len(target.shape) == 1)
-        targets = torch.unbind(target, dim=-1)
+        target_is_categorical = len(target.shape) == 1
+        tdim = -1 if target_is_categorical else -2
+        targets = torch.unbind(target, dim=tdim)
 
         assert(len(inputs) == len(targets))
 
         for inp, target in zip(inputs, targets):
-            weighted_skip_frac = skip_frac / (nonzero_bin_weight if target != 0 else 1.)
+            if(target_is_categorical):
+                weighted_skip_frac = skip_frac / (nonzero_bin_weight if target != 0 else 1.)
 
-            # We don't want too many consecutive tokens from the same prompt,
-            # so we skip a large percentage of them.
-            if(random.random() < weighted_skip_frac):
-                continue
+                # We don't want too many consecutive tokens from the same prompt,
+                # so we skip a large percentage of them.
+                if(random.random() < weighted_skip_frac):
+                    continue
+            else:
+                assert(skip_frac == 0)
 
             batch.append((inp, target))
 
