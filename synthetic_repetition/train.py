@@ -21,7 +21,7 @@ from model import (
     GPTConfig,
 )
 
-DTYPE = torch.bfloat16
+DTYPE = torch.float16
 assert(torch.cuda.is_available())
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 
@@ -116,6 +116,7 @@ def main(args):
         questions_per_sample=args.questions_per_sample,
         force_collision_prob=args.force_collision_prob,
         seed=args.seed + seed_offset,
+        val=False,
     )
 
     dataloader = torch.utils.data.DataLoader(
@@ -129,6 +130,7 @@ def main(args):
         questions_per_sample=args.questions_per_sample,
         force_collision_prob=args.force_collision_prob,
         seed=args.seed + ddp_world_size + 1,
+        val=True,
     )
 
     val_dataloader = torch.utils.data.DataLoader(
@@ -266,7 +268,7 @@ def main(args):
                         'config': args,
                     }
                     print(f"saving checkpoint to {args.output_dir}")
-                    torch.save(checkpoint, os.path.join(args.output_dir, 'ckpt.pt'))
+                    torch.save(checkpoint, os.path.join(args.output_dir, 'ckpt_heavy.pt'))
 
             if batch_no == 0 and args.eval_only:
                 break

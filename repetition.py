@@ -24,8 +24,9 @@ import numpy as np
 
 
 DEVICE= "cuda"
-# DTYPE = torch.bfloat16 if torchs.cuda.is_bf16_supported() else torch.float32
 DTYPE = torch.float32
+# DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
+MAX_LEN = MAX_LEN//2 # repetition would repeat the originla embedding 
 
 def log(verbose, *content, **kwargs):
     if verbose:
@@ -123,6 +124,9 @@ def main(
     small_entropy_dict_path = f"{repetition_filter}/small_entropy/small_entropy_{shard_count}.pickle"
     with open(small_entropy_dict_path, "rb") as fp:
         small_entropy_dict = pickle.load(fp)
+    # large_probs_dict_path = f"{repetition_filter}/large_probs/large_probs_{shard_count}.pickle"
+    # with open(large_probs_dict_path, "rb") as fp:
+    #     large_probs_dict = pickle.load(fp)
 
     with open(prompts_json_path, "r") as fp:
         prompts = json.load(fp)
@@ -132,6 +136,7 @@ def main(
     promot_indicator_sum = 0
     large_entropy_all = []
     small_entropy_all = []
+    # large_probs_all = []
     for i, (prompt_key, promot_indicator) in enumerate(prompt_loader.items()):
         if promot_indicator.sum()  == 0: continue
         # print(prompt_key, promot_indicator.sum())
@@ -143,6 +148,7 @@ def main(
         # encoded_prompt = encoded_prompt[:MAX_LEN]
         large_entropy_array = large_entropy_dict[prompt_key]
         small_entropy_array = small_entropy_dict[prompt_key]
+        # large_probs_array = large_probs_dict[prompt_key]
         try:
             assert promot_indicator.shape[-1] == encoded_prompt.shape[0]
             assert promot_indicator.shape[-1] == large_entropy_array.shape[0] == small_entropy_array.shape[0]
@@ -164,6 +170,7 @@ def main(
     
                 prompt_type.append(large_entropy>0.2)
                 # small_entropy = small_entropy_array[eligible_index].double()
+                # large_probs_all.append(large_probs_array[eligible_index].double()) 
     prompt_type = torch.LongTensor(prompt_type)
 
     print(f"{len(prompt_type)} encoded prompts , w/ {prompt_type.sum()} low_e_high_a examples.", file=sys.stderr) 
@@ -200,7 +207,7 @@ def main(
         orig_embed, repetition_embeds = repetition_experiment(model, model_type, small_lm_head, encoded_prompt, tokenizer, k,
                                                               sample_until_period=sample_until_period,
                                                               addl_token_limit=addl_token_limit,
-                                                              example_path=example_path)
+                                                              verbose=False)
         if ~prompt_type.bool()[i]:
             log(example_path, "high_e_low_a example: ")
         else:
@@ -215,7 +222,8 @@ def main(
                 "original_embed": orig_embed_all, 
                 "large_entropy": large_entropy_all, 
                 "prompt_type": prompt_type,
-                "encoded_prompt": encoded_prompt_all}, 
+                "encoded_prompt": encoded_prompt_all,},
+                # "large_probs": large_probs_all,}, 
                 f'{save_dir}/repetition_{shard_count}.pt')
     
     return
@@ -240,6 +248,8 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
             generated = small_lm_head(orig_embed)
 
     entropy = compute_entropy(generated[0, -1, :])
+    # if entropy < 2.0:
+    #     return orig_embed[0, -1, :].detach().cpu(), None
     log(verbose, f"(orinal entropy: {entropy:.3f})")   
     generated = torch.softmax(generated, dim=-1).detach().cpu()
 
@@ -305,10 +315,10 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
         if model_type == 'pythia':
             repetition_prompt = torch.cat(
                     [
-                        torch.tensor(eos_id, device=DEVICE)[None, None],
+                        # torch.tensor(eos_id, device=DEVICE)[None, None],
                         prompt_with_candidate,
-                        torch.tensor(period_id, device=DEVICE)[None, None],
-                        torch.tensor(eos_id, device=DEVICE)[None, None],
+                        # torch.tensor(period_id, device=DEVICE)[None, None],
+                        # torch.tensor(eos_id, device=DEVICE)[None, None],
                         encoded_prompt,
                     ],
                     dim=-1
@@ -317,7 +327,8 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
             repetition_prompt = torch.cat(
                     [
                         prompt_with_candidate,
-                        torch.tensor(tokenizer.eos_id, device=DEVICE)[None, None],
+                        # torch.tensor(tokenizer.eos_id, device=DEVICE)[None, None], # need to record result for ablation study
+                        # torch.tensor(tokenizer.bos_id, device=DEVICE)[None, None], # need to record result for ablation study
                         encoded_prompt,
                     ],
                     dim=-1
@@ -327,7 +338,7 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
             with torch.no_grad():
                 repetition_embed = model._forward(repetition_prompt)[:, -1, :].detach().cpu()
                 repetition_embeds.append(repetition_embed)
-                if True:
+                if verbose:
                     repetition_logits = model.lm_head(repetition_embed.to(DEVICE))[0, :].detach()
                     entropy = compute_entropy(repetition_logits)
                     repetition_logits = torch.softmax(repetition_logits, dim=-1)
@@ -342,7 +353,7 @@ def repetition_experiment(model, model_type, small_lm_head, encoded_prompt, toke
             with torch.no_grad():
                 repetition_embed = pythia_forward(model, embeddings=True)(repetition_prompt)[:, -1, :].detach().cpu()
                 repetition_embeds.append(repetition_embed)
-                if True:
+                if verbose:
                     repetition_logits = model.embed_out(repetition_embed.to(DEVICE))[0, :].detach()
                     repetition_logits = torch.softmax(repetition_logits, dim=-1)
                     repetition_top_k = torch.topk(repetition_logits, k, dim=-1).indices

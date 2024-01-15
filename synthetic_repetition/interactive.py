@@ -11,7 +11,8 @@ from model import (
 )
 
 
-CHECKPOINT_PATH = "outputs/ckpt.pt"
+# CHECKPOINT_PATH = "/n/holyscratch01/barak_lab/Lab/gahdritz/synthetic/ckpt.pt"
+CHECKPOINT_PATH = "output/ckpt_split.pt"
 
 checkpoint = torch.load(CHECKPOINT_PATH)
 model_args = checkpoint["model_args"]

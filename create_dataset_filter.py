@@ -35,12 +35,12 @@ approximately equal to the proportion of examples with high large model entropy.
 
 
 # DTYPE = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32
-DTYPE = torch.float32
+DTYPE = torch.float32 # PLEASE USE THIS FOR SMALL PYTHIA MODEL O/W UNSTABLE COMPUTATIONS
 DEVICE = torch.device("cuda:0")
 DEFAULT_MODEL_DIRS = {
     "llama": "/n/holystore01/LABS/barak_lab/Everyone/checkpoints/checkpoints/lit-llama/",
     "llama_2": "/n/holyscratch01/barak_lab/Everyone/lit-gpt_llama_2/",
-    "pythia": "/n/holystore01/LABS/barak_lab/Everyone/models/pythia/",
+    "pythia": "/n/holystore01/LABS/barak_lab/Everyone/pythia/",
 }
 
 
@@ -146,6 +146,7 @@ def main(
     by_label = {}
     small_entropy_dict = {}
     large_entropy_dict = {}
+    # large_model_prob_dict = {}
     count = 0
     for i, shard_tups in enumerate(logit_loader):
         if(i % 1000 == 0):
@@ -254,6 +255,8 @@ def main(
             small_entropy_dict[small_key] = small_entropy
             large_entropy_dict[small_key] = large_entropy
 
+            # small_top_idx = torch.topk(large_logits_softmax, k=1, dim=-1).indices.flatten()
+            # large_model_prob_dict[small_key] = large_logits_softmax[torch.arange(0, large_logits_softmax.shape[0]), small_top_idx]
             count += torch.sum(small_entropy_in_range)
 
     print(count)
@@ -430,6 +433,7 @@ def main(
         filt_sum = 0 
         small_entropy_shard = {}
         large_entropy_shard = {}
+        # large_token_probs_shard = {}
         shard_count = 0
         for k,v in filt.items():
             if filt_sum >= shard_size: 
@@ -446,6 +450,10 @@ def main(
                 output_path = os.path.join(output_dir, "large_entropy", f"large_entropy_{shard_count}.pickle")
                 with open(output_path, "wb") as fp:
                     pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+                # output_path = os.path.join(output_dir, "large_probs", f"large_probs_{shard_count}.pickle")
+                # with open(output_path, "wb") as fp:
+                #     pickle.dump(large_token_probs_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
                 shard_count += 1
                 filt_sum = 0
                 filt_shard = {}
@@ -453,6 +461,7 @@ def main(
             filt_shard[k] = v.to(device="cpu")
             small_entropy_shard[k] = small_entropy_dict[k]
             large_entropy_shard[k] = large_entropy_dict[k]
+            # large_token_probs_shard[k] = large_model_prob_dict[k]
             filt_sum += v.sum()
         
         # save the final batch 
@@ -469,6 +478,9 @@ def main(
         output_path = os.path.join(output_dir, "large_entropy", f"large_entropy_{shard_count}.pickle")
         with open(output_path, "wb") as fp:
             pickle.dump(large_entropy_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
+        # output_path = os.path.join(output_dir, "large_probs", f"large_probs_{shard_count}.pickle")
+        # with open(output_path, "wb") as fp:
+        #     pickle.dump(large_token_probs_shard, fp, protocol=pickle.HIGHEST_PROTOCOL)
     else:
         filt = {
             k: v.to(device="cpu") for k,v in filt.items()

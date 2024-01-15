@@ -5,6 +5,7 @@ import random
 import lightning as L
 import torch
 import torch.nn as nn
+from sklearn.metrics import roc_curve, roc_auc_score
 
 import matplotlib.pyplot as plt
 from train_head_utils import load_lm_head
@@ -87,6 +88,7 @@ def main(
     new_embed_all = []
     original_embed_all = []
     large_entropy = []
+    # large_probs = []
     prompt_type = []
     encoded_prompts = []
     for repetition_shard in repetition_shards:
@@ -97,15 +99,18 @@ def main(
         original_embed_all.append(torch.stack(data["original_embed"]).to(DTYPE))
         n_samples = data["new_embed"].shape[0]
         large_entropy.append(torch.concatenate(data["large_entropy"][0: n_samples]).cpu())
+        # large_probs.append(torch.tensor(data["large_probs"]).to(DTYPE))
         prompt_type.append((data["prompt_type"][0: n_samples]).bool().cpu())
         encoded_prompts += data["encoded_prompt"]
 
     new_embed_all = torch.concatenate(new_embed_all)
     original_embed_all = torch.concatenate(original_embed_all)
     large_entropy = torch.concatenate(large_entropy)
+    # large_probs = torch.concatenate(large_probs)
     prompt_type = torch.concatenate(prompt_type)
-    # print("shape checks: ", new_embed_all.shape, original_embed_all.shape, large_entropy.shape, prompt_type.shape, len(encoded_prompts))
-    print("shape checks: ", new_embed_all.shape, original_embed_all.shape, large_entropy.shape, prompt_type.shape)
+    print("shape checks: ", new_embed_all.shape, original_embed_all.shape, large_entropy.shape, prompt_type.shape, len(encoded_prompts))
+    print(prompt_type.sum())
+    # print("shape checks: ", new_embed_all.shape, original_embed_all.shape, large_entropy.shape, large_probs.shape, prompt_type.shape)
 
     original_logits = []
     new_logits = []
@@ -130,9 +135,12 @@ def main(
     else: 
         img_output_dir = os.path.join(os.path.dirname(repetition_dir), "results")
         Path(img_output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # topk_variability(original_probs, new_probs, large_entropy, prompt_type)
 
+    # top_token_probs(original_probs, new_probs, large_probs, prompt_type)
 
-    # plot_entropy(original_entropy.numpy(), new_entropy.numpy(), large_entropy.numpy(), prompt_type.numpy())
+    plot_entropy(original_entropy.numpy(), new_entropy.numpy(), large_entropy.numpy(), prompt_type.numpy())
 
     mutual_information(original_probs, new_probs, prompt_type)
 
@@ -375,11 +383,141 @@ def plot_entropy(original_entropy, new_entropy, large_entropy, prompt_type):
     plt.savefig(f"{img_output_dir}/original_entropy.png")
 
     print("--- original entropy classifier ---")
-    simple_classification(torch.from_numpy(original_entropy).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
+    org_entropy_pred = simple_classification(torch.from_numpy(original_entropy).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
 
     # print("--- ALL(entropy) classifier ---")
     # simple_classification(torch.from_numpy(new_entropy).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
 
+    print("--- min entropy classifier ---")
+    min_entropy_pred = simple_classification(torch.from_numpy(new_entropy.min(axis=1)).to(DEVICE), torch.from_numpy(prompt_type).to(DEVICE))
+
+    plt.figure(figsize=(8, 10))
+    plt.subplot(3, 1, 1)
+    plt.hist(original_entropy[prompt_type].flatten(), bins=20, histtype="step", label="aleatoric (7B original)")
+    plt.hist(original_entropy[~prompt_type].flatten(), bins=20, histtype="step", label="epistemic (7B original)")
+    plt.xlabel("Entropy")
+    plt.ylabel("Count")
+    plt.xlim([-.2, 4.2])
+    plt.legend(loc=1)
+
+    plt.subplot(3, 1, 2)
+    # plt.hist(large_entropy, bins=20, histtype="step", label="30B model Entropy", ls='--')
+    plt.hist(large_entropy[prompt_type].flatten(), bins=20, histtype="step", label="aleatoric (30B original)")
+    plt.hist(large_entropy[~prompt_type].flatten(), bins=20, histtype="step", label="epistemic (30B original)")
+    plt.xlabel("Entropy")
+    plt.ylabel("Count")
+    plt.xlim([-.2, 4.2])
+    plt.legend(loc=1)
+
+
+    plt.subplot(3, 1, 3)
+    plt.hist(new_entropy[prompt_type].min(axis=1), bins=30, histtype="step", label="aleatoric (repetition)")
+    plt.hist(new_entropy[~prompt_type].min(axis=1), bins=30, histtype="step", label="epistemic (repetition)")
+    plt.xlabel("Entropy")
+    plt.ylabel("Count")
+    plt.xlim([-.2, 4.2])
+    plt.legend(loc=1)
+    plt.savefig(f"{img_output_dir}/min_entropy.pdf")
+
+    # plot roc curve
+    with torch.no_grad():
+        # Plot the ROC curve
+        plt.figure(figsize=(6, 6))
+        fpr, tpr, _ = roc_curve(prompt_type, min_entropy_pred.detach().cpu().numpy())
+        plt.plot(fpr, tpr, label="repetition entropy predictor") # ROC curve = TPR vs FPR
+        fpr, tpr, _ = roc_curve(prompt_type, org_entropy_pred.detach().cpu().numpy())
+        plt.plot(fpr, tpr, label="7B original entropy predictor") # ROC curve = TPR vs FPR
+        fpr, tpr, _ = roc_curve(prompt_type, [0 for _ in range(len(prompt_type))])
+        plt.plot(fpr, tpr, label="random guess") # ROC curve = TPR vs FPR
+        plt.title("ROC for unsupervised method (repetition)")
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.legend(loc=0)
+        plt.savefig(f"{img_output_dir}/roc.pdf", bbox_inches='tight')
+    
+    # compute AUC score
+    min_entropy_auc = roc_auc_score(prompt_type, min_entropy_pred.detach().cpu().numpy())
+    org_entropy_auc = roc_auc_score(prompt_type, org_entropy_pred.detach().cpu().numpy())
+    print(f"org entropy auc: {min_entropy_auc:.3f}, min entropy auc: {org_entropy_auc:.3f}")
+    
+
+def topk_variability(x_probs, y_probs, large_entropy, prompt_type):
+    px = torch.topk(x_probs, 10, dim=1)
+    top_k_idx = px.indices
+    p_x = px.values
+
+    p_y = torch.zeros(top_k_idx.shape[0], 10, device=p_x.get_device())
+    for i in range(top_k_idx.shape[0]):
+        for j in range(top_k_idx.shape[1]):
+            # for k in range(top_k_idx.shape[1]):
+            p_y[i, j] = y_probs[i, j, top_k_idx[i, j]]
+    # p_y = torch.max(p_y,dim=-1).values
+    p_y = p_y[:, 0]
+    weighted_variability = p_y
+
+    plt.figure()
+    plt.hist(weighted_variability[prompt_type].cpu().numpy().flatten(), bins=50, histtype="step", label="low_e_high_a")
+    plt.hist(weighted_variability[~prompt_type].cpu().numpy().flatten(), bins=50, histtype="step", label="high_e_low_a")
+    plt.xlabel("Probability variability")
+    plt.ylabel("Count")
+    plt.legend()
+    plt.savefig(f"{img_output_dir}/probs_variability.png", bbox_inches='tight')
+
+    plt.figure()
+    plt.plot(weighted_variability[prompt_type].detach().cpu().numpy(), large_entropy[prompt_type].detach().cpu().numpy(), '.', label="low_e_high_a")
+    plt.plot(weighted_variability[~prompt_type].detach().cpu().numpy(), large_entropy[~prompt_type].detach().cpu().numpy(), '.', label="high_e_low_a")
+    plt.xlabel("repetition variability")
+    plt.ylabel("Large model entropy")
+    plt.legend()
+    plt.savefig(f"{img_output_dir}/variability_entropy.png", bbox_inches='tight')
+
+
+    print("--- probs variability classifier ---")
+    simple_classification(weighted_variability.to(DEVICE), prompt_type.to(DEVICE))
+    
+    return
+
+
+def top_token_probs(x_probs, y_probs, large_probs, prompt_type):
+    px = torch.topk(x_probs, 10, dim=1)
+    top_k_idx = px.indices
+    p_x = px.values
+
+    # p_y = torch.zeros(top_k_idx.shape[0], 10, 10, device=p_x.get_device())
+    # for i in range(top_k_idx.shape[0]):
+    #     for j in range(top_k_idx.shape[1]):
+    #         for k in range(top_k_idx.shape[1]):
+    #             p_y[i, j, k] = y_probs[i, k, top_k_idx[i, j]]
+    # p_y = torch.max(p_y, dim=-1).values - torch.min(p_y,dim=-1).values 
+    # # p_y = torch.mean(p_y, dim=-1)
+    # # weighted_variability = torch.max(p_y, dim=-1).values ]
+    p_y = torch.zeros(top_k_idx.shape[0], 10, device=p_x.get_device())
+    for i in range(top_k_idx.shape[0]):
+        for j in range(top_k_idx.shape[1]):
+            # for k in range(top_k_idx.shape[1]):
+            p_y[i, j] = y_probs[i, j, top_k_idx[i, j]]
+    # p_y = torch.max(p_y,dim=-1).values
+    p_y = p_y[:, 0]
+    # x_probs = torch.topk(x_probs, 1, dim=-1).values.flatten()
+    weighted_variability = p_y
+# 
+    plt.figure()
+    plt.plot(weighted_variability[prompt_type].detach().cpu().numpy(), large_probs[prompt_type].detach().cpu().numpy(), '.', label="low_e_high_a")
+    plt.plot(weighted_variability[~prompt_type].detach().cpu().numpy(), large_probs[~prompt_type].detach().cpu().numpy(), '.', label="high_e_low_a")
+    plt.xlabel("repetition variability")
+    plt.ylabel("Large model probability")
+    plt.legend()
+    plt.savefig(f"{img_output_dir}/top_token_probability.png", bbox_inches='tight')
+
+    plt.figure()
+    plt.plot(x_probs[prompt_type].cpu().numpy(), large_probs[prompt_type].detach().cpu().numpy(), '.', label="low_e_high_a")
+    plt.plot(x_probs[~prompt_type].cpu().numpy(), large_probs[~prompt_type].detach().cpu().numpy(), '.', label="high_e_low_a")
+    plt.xlabel("Small model probability")
+    plt.ylabel("Large model probability")
+    plt.legend()
+    plt.savefig(f"{img_output_dir}/top_sl_probability.png", bbox_inches='tight')
+
+    return
 
 def simple_classification(x_train, y_train):
     if len(x_train.shape) == 1:
@@ -411,13 +549,15 @@ def simple_classification(x_train, y_train):
         optimizer.step()
         optimizer.zero_grad()
 
-        if i % 200 == 0: 
+        if i % 1000 == 0: 
             prediction = output.detach().view(-1) > 0
             accuracy = torch.sum((prediction==y_train).bool()) / y_train.shape[0]
-            print(f"\tEpoch {i}, Loss:{loss.item():.3f}, Acc:{accuracy.item():.2f}")
+            print(f"\tEpoch {i}, Loss:{loss.item():.3f}, Acc:{accuracy.item():.3f}")
+
+
 
     # output = output.view(-1).detach()
-    # # most wrong examples
+    # most wrong examples
     # for type in [0, 1]:
     #     wrong_idx = torch.argwhere((prediction!=y_train)&(y_train == type)).view(-1)
     #     wrong_idx_topk = torch.topk(output[wrong_idx], k=20, largest=not bool(type)).indices
@@ -431,7 +571,7 @@ def simple_classification(x_train, y_train):
     #         decoded_prediction = tokenizer.decode(original_prediction[p])
     #         print(f"{decoded_prompt} [{decoded_prediction} (H={large_entropy[p]:.2f})]")
 
-    # # most correct  examples
+    # most correct  examples
     # for type in [0, 1]:
     #     wrong_idx = torch.argwhere((prediction==y_train)&(y_train == type)).view(-1)
     #     wrong_idx_topk = torch.topk(output[wrong_idx], k=20, largest=bool(type)).indices
@@ -447,7 +587,7 @@ def simple_classification(x_train, y_train):
     #         print(f"{decoded_prompt} [{decoded_prediction} (H={large_entropy[p]:.2f})]")
 
 
-    return
+    return output
 
 
     

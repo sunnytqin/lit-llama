@@ -79,29 +79,36 @@ def generate_synthetic_repetition_dataset(
     questions_per_sample=1,
     force_collision_prob=0.,
     seed=42,
+    val=False,
 ):
     random_gen = random.Random(seed)
 
     assert(question_length > 1)
+    if val:
+        train_q = [*range(2**(question_length - 1))]
+    else:
+        test_q = [random_gen.randint(0, 2 ** (question_length - 1) - 1) for _ in range(10000)]
+        print("test q: ", test_q[0:10])
+        train_q = []
+        for i in range(2**(question_length - 1)):
+            if i not in test_q: train_q.append(i)
 
     sample = []
-    epistemic_qs = []
+    previous_qs = []
     while True:
         # Determine if the question is epistemic or aleatoric
         first_bit = 0 if random_gen.random() < epistemic_prob else 1
 
         # Generate the rest of the question
         remaining_bits = ''
-        q = random_gen.randint(0, 2 ** (question_length - 1) - 1)
+        q = train_q[random_gen.randint(0, len(train_q)-1)]
         
-        if(first_bit == 0):
-            # Epistemic
-            if(random_gen.random() < force_collision_prob and len(epistemic_qs) > 0):
-                # Force a collision
-                q = epistemic_qs[random_gen.randint(0, len(epistemic_qs) - 1)]
+        if(first_bit == 0): # also repeating aleatoric questions break the model
+            if(random_gen.random() < force_collision_prob and len(previous_qs) > 0 ):
+                q = previous_qs[random_gen.randint(0, len(previous_qs) - 1)]
             else:
-                epistemic_qs.append(q)
-
+                previous_qs.append(q)
+            
         remaining_bits = bin(q)[2:].zfill((question_length - 1))
         q_str = f"{first_bit}{remaining_bits}"
 
@@ -119,7 +126,83 @@ def generate_synthetic_repetition_dataset(
             yield list(zip(*sample))
 
             sample = []
-            epistemic_qs = []
+            previous_qs = [] 
+
+def test_dataset_hint(question_length, exclusion = [[3, 7, 13], [4, 6, 14]]):
+    inclusion = []
+    for i in range(question_length - 1):
+        if (i not in exclusion[0]) and (i not in exclusion[1]): inclusion.append(i)
+    print("inclusion: ", inclusion)
+
+    sample_questions = []
+    for _ in range(10):
+        empty_template = torch.zeros(question_length - 1, dtype=torch.long)
+        empty_template[exclusion[0]] = 0
+        empty_template[exclusion[1]] = 1
+        empty_template[inclusion] = torch.randint(0, 2, [len(inclusion)])
+        bin_q = ''.join(str(x) for x in empty_template.tolist())
+        bin_q = int('0b' + bin_q, 2)
+        sample_questions.append(bin_q)
+
+    return sample_questions
+
+def generate_synthetic_repetition_dataset_heavytail(
+    question_length,
+    epistemic_prob=0.5,
+    questions_per_sample=1,
+    force_collision_prob=0., 
+    seed=42,
+    **kwargs, 
+):
+    random_gen = random.Random(seed)
+    # uniform = torch.distributions.log_normal.LogNormal(loc=8, scale=0.12)
+    heavy_tail = torch.distributions.half_cauchy.HalfCauchy(scale=5.)
+
+    assert(question_length > 1)
+
+    sample = []
+    # epistemic_qs = []
+    while True:
+        # Determine if the question is epistemic or aleatoric
+        first_bit = 0 if random_gen.random() < epistemic_prob else 1
+
+        # Generate the rest of the question
+        remaining_bits = ''
+
+        if first_bit == 1:
+            q = random_gen.randint(0, 2 ** (question_length - 1) - 1)
+        else:  
+            q = torch.clip(heavy_tail.sample().to(torch.long), max=2 ** (question_length - 1) - 1)
+        
+        # if(first_bit == 0):
+        #     # Epistemic
+        #     if(random_gen.random() < force_collision_prob and len(epistemic_qs) > 0):
+        #         # Force a collision
+        #         q = epistemic_qs[random_gen.randint(0, len(epistemic_qs) - 1)]
+        #     else:
+        #         epistemic_qs.append(q)
+
+        remaining_bits = bin(q)[2:].zfill((question_length - 1))
+        q_str = f"{first_bit}{remaining_bits}"
+
+        # Generate the answer
+        if first_bit == 0:
+            # Epistemic
+            a = get_answer(q)
+        else:
+            # Aleatoric
+            a = random_gen.randint(0, 1)
+
+        sample.append((q_str, str(a)))
+
+        if(len(sample) == questions_per_sample):
+            # e_questions = [q[0] for q in sample if q[0][0] == '0']
+            
+            # if(len(set(e_questions)) < len(e_questions)):
+            yield list(zip(*sample))
+
+            sample = []
+            # epistemic_qs = []
 
 
 def get_answer(epistemic_question):
@@ -136,23 +219,32 @@ class SyntheticRepetitionDataset(torch.utils.data.IterableDataset):
         questions_per_sample=1,
         force_collision_prob=0.,
         seed=42,
+        heavy_tail=False,
+        val=False,
     ):
         self.question_length = question_length
         self.epistemic_prob = epistemic_prob
         self.questions_per_sample = questions_per_sample
         self.force_collision_prob = force_collision_prob
         self.seed = seed
+        self.range = range
+        self.val = val
+        if heavy_tail:
+            self.generator = generate_synthetic_repetition_dataset_heavytail
+        else:
+            self.generator = generate_synthetic_repetition_dataset
 
     def __len__(self):
         return float('inf')
 
     def __iter__(self):
-        return generate_synthetic_repetition_dataset(
+        return self.generator(
             question_length=self.question_length,
             epistemic_prob=self.epistemic_prob,
             questions_per_sample=self.questions_per_sample,
             force_collision_prob=self.force_collision_prob,
             seed=self.seed,
+            val = self.val,
         )
 
 
@@ -189,22 +281,32 @@ def compute_epistemic_collision_prob(
 
 
 if __name__ == "__main__":
-    ql = 10
+    ql = 19
     ep = 0.5
-    qps = 4
+    qps = 15
+    fcp = 0.8
 
     print(f"Predicted: {compute_epistemic_collision_prob(ql, ep, qps)}")
+    print("test set samples: ", test_dataset_hint(ql))
 
-    gen = generate_synthetic_repetition_dataset(ql, ep, qps)
-    collision_count = 0
-    total_examples = 1e6
+    gen = generate_synthetic_repetition_dataset(ql, ep, qps, fcp, val=False)
+    e_collision_count = 0
+    a_collision_count = 0
+    total_examples = 1e4
     for _ in range(int(total_examples)):
-        questions = next(gen)[0]
+        questions, answers = next(gen)
         
         # Keep the empirical ones
-        questions = [q for q in questions if q[0] == '0']
+        e_questions = [q for q in questions if q[0] == '0']
         
-        if(len(set(questions)) < len(questions)):
-            collision_count += 1
+        if(len(set(e_questions)) < len(e_questions)):
+            e_collision_count += 1
 
-    print(f"Empirical: {collision_count / total_examples}")
+        # Keep the empirical ones
+        a_questions = [q for q in questions if q[0] == '1']
+        
+        if(len(set(a_questions)) < len(a_questions)):
+            a_collision_count += 1
+            
+
+    print(f"Empirical: {e_collision_count / total_examples}, {a_collision_count / total_examples}")

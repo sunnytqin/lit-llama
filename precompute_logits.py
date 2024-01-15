@@ -27,7 +27,7 @@ from train_head_utils import (
     MAX_LEN,
 )
 
-#DTYPE = torch.float32
+#DTYPE = torch.float32 # USE THIS FOR SMALL PYTHIA MODELS
 DTYPE = torch.bfloat16
 DEVICE = torch.device('cuda:0')
 SUPPORTED_MODEL_TYPES = set([
